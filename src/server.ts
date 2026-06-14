@@ -89,13 +89,11 @@ const toolPayloadSchema = z.object({
   patch: z.string().optional(),
 });
 
-function cardOutputSchema<TTool extends string>(
-  tool: TTool,
+function cardOutputSchema(
   summary: z.ZodType,
   extra: z.ZodRawShape = {},
 ): z.ZodRawShape {
   return {
-    tool: z.literal(tool),
     resultId: z.string(),
     workspaceId: z.string(),
     path: z.string().optional(),
@@ -394,7 +392,6 @@ function createMcpServer(
           ),
       },
       outputSchema: {
-        tool: z.literal("open_workspace"),
         resultId: z.string(),
         workspaceId: z.string(),
         root: z.string(),
@@ -463,8 +460,8 @@ function createMcpServer(
 
       return {
         content: resultContent,
+        _meta: { tool: "open_workspace" },
         structuredContent: {
-          tool: "open_workspace",
           resultId: storedResult.id,
           workspaceId: workspace.id,
           root: workspace.root,
@@ -507,7 +504,6 @@ function createMcpServer(
           .describe("Maximum number of lines to read."),
       },
       outputSchema: cardOutputSchema(
-        "read_file",
         z.object({
           lines: z.number().int().nonnegative(),
           characters: z.number().int().nonnegative(),
@@ -554,8 +550,8 @@ function createMcpServer(
 
       return {
         ...response,
+        _meta: { tool: "read_file" },
         structuredContent: {
-          tool: "read_file",
           resultId: storedResult.id,
           workspaceId,
           path: input.path,
@@ -587,7 +583,6 @@ function createMcpServer(
         content: z.string().describe("Complete new file content."),
       },
       outputSchema: cardOutputSchema(
-        "write_file",
         z.object({
           additions: z.number().int().nonnegative(),
           removals: z.number().int().nonnegative(),
@@ -639,8 +634,8 @@ function createMcpServer(
 
       return {
         ...response,
+        _meta: { tool: "write_file" },
         structuredContent: {
-          tool: "write_file",
           resultId: storedResult.id,
           workspaceId,
           path: input.path,
@@ -683,7 +678,6 @@ function createMcpServer(
           .min(1),
       },
       outputSchema: cardOutputSchema(
-        "edit_file",
         z.object({
           additions: z.number().int().nonnegative(),
           removals: z.number().int().nonnegative(),
@@ -741,8 +735,8 @@ function createMcpServer(
 
       return {
         content: editContent,
+        _meta: { tool: "edit_file" },
         structuredContent: {
-          tool: "edit_file",
           resultId: storedResult.id,
           workspaceId,
           status: "applied",
@@ -780,7 +774,6 @@ function createMcpServer(
           include: z.string().optional().describe("Optional include glob."),
         },
         outputSchema: cardOutputSchema(
-          "grep_files",
           z.object({
             pattern: z.string(),
             scope: z.string(),
@@ -829,8 +822,8 @@ function createMcpServer(
 
         return {
           ...response,
+          _meta: { tool: "grep_files" },
           structuredContent: {
-            tool: "grep_files",
             resultId: storedResult.id,
             workspaceId,
             path: input.path,
@@ -863,7 +856,6 @@ function createMcpServer(
             .describe("Optional path scope relative to the workspace root."),
         },
         outputSchema: cardOutputSchema(
-          "find_files",
           z.object({
             pattern: z.string(),
             scope: z.string(),
@@ -912,8 +904,8 @@ function createMcpServer(
 
         return {
           ...response,
+          _meta: { tool: "find_files" },
           structuredContent: {
-            tool: "find_files",
             resultId: storedResult.id,
             workspaceId,
             path: input.path,
@@ -946,7 +938,6 @@ function createMcpServer(
             ),
         },
         outputSchema: cardOutputSchema(
-          "list_directory",
           z.object({
             lines: z.number().int().nonnegative(),
             characters: z.number().int().nonnegative(),
@@ -987,8 +978,8 @@ function createMcpServer(
 
         return {
           ...response,
+          _meta: { tool: "list_directory" },
           structuredContent: {
-            tool: "list_directory",
             resultId: storedResult.id,
             workspaceId,
             path: input.path,
@@ -1035,7 +1026,6 @@ function createMcpServer(
           .describe("Timeout in seconds. Defaults to 30, max 300."),
       },
       outputSchema: cardOutputSchema(
-        "run_shell",
         z.object({
           command: z.string(),
           workingDirectory: z.string(),
@@ -1085,8 +1075,8 @@ function createMcpServer(
 
       return {
         ...response,
+        _meta: { tool: "run_shell" },
         structuredContent: {
-          tool: "run_shell",
           resultId: storedResult.id,
           workspaceId,
           path: workingDirectory,

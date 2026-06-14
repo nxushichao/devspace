@@ -58,11 +58,29 @@ interface PayloadResult {
   summary?: Record<string, unknown>;
 }
 
-function isToolResultCard(value: unknown): value is ToolResultCard {
+function isToolName(value: unknown): value is ToolName {
+  return (
+    value === "open_workspace" ||
+    value === "read_file" ||
+    value === "write_file" ||
+    value === "edit_file" ||
+    value === "grep_files" ||
+    value === "find_files" ||
+    value === "list_directory" ||
+    value === "run_shell"
+  );
+}
+
+function toolNameFromMeta(result: CallToolResult): ToolName | undefined {
+  const meta = result._meta as Record<string, unknown> | undefined;
+  return isToolName(meta?.tool) ? meta.tool : undefined;
+}
+
+function isToolResultCard(value: unknown): value is Omit<ToolResultCard, "tool"> {
   if (!value || typeof value !== "object") return false;
 
   const candidate = value as Partial<ToolResultCard>;
-  return typeof candidate.tool === "string" && typeof candidate.resultId === "string";
+  return typeof candidate.resultId === "string";
 }
 
 function getStructuredContent<T>(result: CallToolResult): T | undefined {
@@ -92,7 +110,8 @@ function AppRoot() {
 
     createdApp.ontoolresult = (result) => {
       const structured = result.structuredContent;
-      if (!isToolResultCard(structured)) {
+      const tool = toolNameFromMeta(result);
+      if (!tool || !isToolResultCard(structured)) {
         setCard(null);
         setPayload(null);
         setExpanded(false);
@@ -101,7 +120,7 @@ function AppRoot() {
         return;
       }
 
-      setCard(structured);
+      setCard({ ...structured, tool });
       setPayload(null);
       setExpanded(false);
       setLoadState("idle");
