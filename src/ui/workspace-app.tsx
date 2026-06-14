@@ -585,9 +585,11 @@ function getToolDisplay(card: ToolResultCard): {
 }
 
 function getToolLabel(card: ToolResultCard): string {
+  if (isShellTool(card.tool)) {
+    return String(card.summary?.command ?? card.path ?? card.tool);
+  }
   if (card.path) return card.path;
   if (card.root) return card.root;
-  if (isShellTool(card.tool)) return String(card.summary?.command ?? card.tool);
   if (isSearchTool(card.tool)) {
     return String(card.summary?.pattern ?? card.tool);
   }
