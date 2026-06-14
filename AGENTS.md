@@ -13,6 +13,13 @@ such as read, edit, write, grep, find, ls, and bash. The MCP server should wrap
 those primitives behind a remote Streamable HTTP MCP interface, suitable for use
 through a Cloudflare Tunnel.
 
+The model-facing workflow is workspace based. MCP clients should call
+`open_workspace` with a local project directory, then use the returned
+`workspaceId` for subsequent tool calls. `AGENTS.md` files are returned
+automatically by `open_workspace` and by later tool calls when the requested path
+enters a directory with instructions that have not been loaded for that
+workspace.
+
 Core constraints:
 
 - Treat this as remote access to the local machine; security is part of the

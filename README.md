@@ -9,6 +9,7 @@ delegated to a separate local agent loop.
 ## Current Tools
 
 - `server_info`
+- `open_workspace`
 - `read_file`
 - `write_file`
 - `edit_file`
@@ -16,6 +17,31 @@ delegated to a separate local agent loop.
 - `find_files`
 - `list_directory`
 - `run_shell`
+
+## Workspace Flow
+
+Call `open_workspace` before using the coding tools:
+
+```json
+{
+  "path": "/home/waishnav/personal/pi-on-mcp"
+}
+```
+
+The result includes a `workspaceId`. Use that `workspaceId` for subsequent
+calls:
+
+```json
+{
+  "workspaceId": "ws_...",
+  "path": "README.md"
+}
+```
+
+The server automatically loads `AGENTS.md` files for the workspace root and for
+directories reached by later file, list, search, edit, write, or shell calls.
+Tool responses include whether each discovered `AGENTS.md` was newly loaded or
+already loaded in that workspace.
 
 ## Run Locally
 
