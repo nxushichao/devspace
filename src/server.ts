@@ -29,6 +29,7 @@ import {
   createResultStore,
   type ToolResultStore,
 } from "./result-store.js";
+import { formatSkillsNotice } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsNotice, WorkspaceRegistry } from "./workspaces.js";
 
@@ -116,7 +117,11 @@ function serverInstructions(config: ServerConfig, toolNames: ToolNames): string 
     ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
     : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
 
-  return `Use DevSpace as a local coding workspace. First call ${toolNames.openWorkspace} with a project directory inside an allowed root. Then use the returned workspaceId for all file, search, edit, write, and shell tools. Follow any AGENTS.md context returned by ${toolNames.openWorkspace} or subsequent tool calls. ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.`;
+  const skills = config.skillsEnabled
+    ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
+    : "";
+
+  return `Use DevSpace as a local coding workspace. First call ${toolNames.openWorkspace} with a project directory inside an allowed root. Then use the returned workspaceId for all file, search, edit, write, and shell tools. Follow any AGENTS.md context returned by ${toolNames.openWorkspace} or subsequent tool calls. ${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.`;
 }
 const toolPayloadSchema = z.object({
   content: z
@@ -461,6 +466,8 @@ function createMcpServer(
           .optional(),
         summary: z.object({
           agentsFiles: z.number().int().nonnegative(),
+          skills: z.number().int().nonnegative(),
+          skillDiagnostics: z.number().int().nonnegative(),
         }),
         result: z.string(),
       },
@@ -474,8 +481,14 @@ function createMcpServer(
     },
     async ({ path, mode, baseRef }) => {
       const { workspace, agentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+      const agentsNotice = formatAgentsNotice(agentsFiles);
+      const skillsNotice = formatSkillsNotice(workspace.skills, {
+        compact: config.compactSkills,
+      });
       const summary = {
         agentsFiles: agentsFiles.length,
+        skills: workspace.skills.length,
+        skillDiagnostics: workspace.skillDiagnostics.length,
       };
       const storedResult = results.put({
         tool: "open_workspace",
@@ -488,7 +501,7 @@ function createMcpServer(
           content: [
             {
               type: "text",
-              text: formatAgentsNotice(agentsFiles) ?? "",
+              text: [agentsNotice, skillsNotice].filter(Boolean).join("\n\n"),
             },
           ],
         },
@@ -507,18 +520,35 @@ function createMcpServer(
                 path: file.path,
                 alreadyLoaded: file.alreadyLoaded,
               })),
+              skills: workspace.skills
+                .filter((skill) => !skill.disableModelInvocation)
+                .map((skill) => ({
+                  name: skill.name,
+                  path: skill.filePath,
+                })),
+              skillDiagnostics: workspace.skillDiagnostics.length,
               instruction:
-                "Use this workspaceId in all subsequent tool calls for this project. Follow the AGENTS.md context returned below.",
+                config.skillsEnabled
+                  ? "Use this workspaceId in all subsequent tool calls for this project. Follow the AGENTS.md context returned below. When a task matches an available skill, read its path before proceeding."
+                  : "Use this workspaceId in all subsequent tool calls for this project. Follow the AGENTS.md context returned below.",
             },
             null,
             2,
           ),
         },
-        ...(formatAgentsNotice(agentsFiles)
+        ...(agentsNotice
           ? [
               {
                 type: "text" as const,
-                text: formatAgentsNotice(agentsFiles)!,
+                text: agentsNotice,
+              },
+            ]
+          : []),
+        ...(skillsNotice
+          ? [
+              {
+                type: "text" as const,
+                text: skillsNotice,
               },
             ]
           : []),
@@ -546,14 +576,20 @@ function createMcpServer(
     {
       title: "Read file",
       description:
-        "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId. If the file path enters a directory with an AGENTS.md, that AGENTS.md context is returned as newly loaded or already loaded.",
+        config.skillsEnabled
+          ? "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId. If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
+          : "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId. If the file path enters a directory with an AGENTS.md, that AGENTS.md context is returned as newly loaded or already loaded.",
       inputSchema: {
         workspaceId: z
           .string()
           .describe("Workspace identifier returned by open_workspace."),
         path: z
           .string()
-          .describe("File path to read, relative to the workspace root."),
+          .describe(
+            config.skillsEnabled
+              ? "File path to read, relative to the workspace root. May also be an advertised skill path from available_skills."
+              : "File path to read, relative to the workspace root.",
+          ),
         offset: z
           .number()
           .int()
@@ -585,17 +621,24 @@ function createMcpServer(
     },
     async ({ workspaceId, ...input }) => {
       const workspace = workspaces.getWorkspace(workspaceId);
-      const targetPath = workspaces.resolvePath(workspace, input.path);
-      const agentsNotice = formatAgentsNotice(
-        await workspaces.loadAgentsForPath(workspace, targetPath),
+      const readPath = workspaces.resolveReadPath(workspace, input.path);
+      const agentsNotice = readPath.skillRead
+        ? undefined
+        : formatAgentsNotice(
+            await workspaces.loadAgentsForPath(workspace, readPath.absolutePath),
+          );
+      const response = await readFileTool(
+        { ...input, path: readPath.absolutePath },
+        {
+          cwd: workspace.root,
+          root: workspace.root,
+          readRoots: readPath.readRoots,
+          agentsNotice,
+        },
       );
-      const response = await readFileTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-        agentsNotice,
-      });
 
       if (response.isError) return response;
+      workspaces.markReadPathLoaded(workspace, readPath);
 
       const summary = {
         ...textSummary(response.content),

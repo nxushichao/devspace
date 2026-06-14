@@ -28,6 +28,7 @@ export type ToolResponse<TDetails = unknown> = {
 interface ToolContext {
   cwd: string;
   root: string;
+  readRoots?: string[];
   agentsNotice?: string;
 }
 
@@ -72,7 +73,7 @@ function appendAgentsNotice(content: McpContent[], agentsNotice: string | undefi
 }
 
 export async function readFileTool(input: ReadToolInput, context: ToolContext): Promise<ToolResponse> {
-  const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+  const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root]);
   const tool = createReadTool(context.cwd);
 
   return runTool((params) => tool.execute("read_file", params), {
