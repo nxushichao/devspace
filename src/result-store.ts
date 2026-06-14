@@ -16,7 +16,14 @@ export type StoredToolName =
   | "grep_files"
   | "find_files"
   | "list_directory"
-  | "run_shell";
+  | "run_shell"
+  | "read"
+  | "write"
+  | "edit"
+  | "grep"
+  | "glob"
+  | "ls"
+  | "bash";
 
 type StoredContent =
   | { type: "text"; text: string }

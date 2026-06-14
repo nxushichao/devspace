@@ -4,7 +4,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 import { SqliteResultStore } from "./result-store.js";
 
-const stateDir = await mkdtemp(join(tmpdir(), "pi-on-mcp-result-store-test-"));
+const stateDir = await mkdtemp(join(tmpdir(), "devspace-result-store-test-"));
 
 try {
   const firstStore = new SqliteResultStore(stateDir);

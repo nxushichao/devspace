@@ -66,8 +66,58 @@ const storedToolNameSchema = z.enum([
   "find_files",
   "list_directory",
   "run_shell",
+  "read",
+  "write",
+  "edit",
+  "grep",
+  "glob",
+  "ls",
+  "bash",
 ]);
 const summarySchema = z.record(z.string(), z.unknown());
+
+interface ToolNames {
+  openWorkspace: "open_workspace";
+  read: "read_file" | "read";
+  write: "write_file" | "write";
+  edit: "edit_file" | "edit";
+  grep: "grep_files" | "grep";
+  glob: "find_files" | "glob";
+  ls: "list_directory" | "ls";
+  shell: "run_shell" | "bash";
+}
+
+function toolNamesFor(config: ServerConfig): ToolNames {
+  return config.toolNaming === "short"
+    ? {
+        openWorkspace: "open_workspace",
+        read: "read",
+        write: "write",
+        edit: "edit",
+        grep: "grep",
+        glob: "glob",
+        ls: "ls",
+        shell: "bash",
+      }
+    : {
+        openWorkspace: "open_workspace",
+        read: "read_file",
+        write: "write_file",
+        edit: "edit_file",
+        grep: "grep_files",
+        glob: "find_files",
+        ls: "list_directory",
+        shell: "run_shell",
+      };
+}
+
+function serverInstructions(config: ServerConfig, toolNames: ToolNames): string {
+  const inspection = config.minimalTools
+    ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
+    : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
+
+  return `Use DevSpace as a local coding workspace. First call ${toolNames.openWorkspace} with a project directory inside an allowed root. Then use the returned workspaceId for all file, search, edit, write, and shell tools. Follow any AGENTS.md context returned by ${toolNames.openWorkspace} or subsequent tool calls. ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.`;
+}
 const toolPayloadSchema = z.object({
   content: z
     .array(
@@ -269,6 +319,7 @@ function createMcpServer(
   workspaces: WorkspaceRegistry,
   results: ToolResultStore,
 ): McpServer {
+  const toolNames = toolNamesFor(config);
   const server = new McpServer(
     {
       name: "devspace",
@@ -278,9 +329,7 @@ function createMcpServer(
         "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, and shell tools.",
     },
     {
-      instructions: config.minimalTools
-        ? "Use this server as a local coding workspace harness. First call open_workspace with a project directory inside an allowed root. Then use the returned workspaceId for all file, edit, write, and shell tools. Follow any AGENTS.md context returned by open_workspace or subsequent tool calls. In minimal tool mode, grep_files, find_files, and list_directory are disabled; use run_shell with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. Prefer read_file for direct file reads, edit_file for targeted modifications, write_file only for new files or complete rewrites, and run_shell for tests/builds/git/search/list commands. Do not create or modify files with run_shell; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files."
-        : "Use this server as a local coding workspace harness. First call open_workspace with a project directory inside an allowed root. Then use the returned workspaceId for all file, search, edit, write, and shell tools. Follow any AGENTS.md context returned by open_workspace or subsequent tool calls. Prefer read_file and search tools for inspection, edit_file for targeted modifications, write_file only for new files or complete rewrites, and run_shell for tests/builds/git commands. Do not create or modify files with run_shell; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.",
+      instructions: serverInstructions(config, toolNames),
     },
   );
 
@@ -289,7 +338,7 @@ function createMcpServer(
     "DevSpace Diff Card",
     WORKSPACE_APP_URI,
     {
-      description: "Interactive card for viewing edit_file diffs.",
+      description: "Interactive card for viewing DevSpace file diffs.",
       _meta: {
         ui: {
           csp: appCsp(config),
@@ -465,7 +514,7 @@ function createMcpServer(
 
   registerAppTool(
     server,
-    "read_file",
+    toolNames.read,
     {
       title: "Read file",
       description:
@@ -528,7 +577,7 @@ function createMcpServer(
       const storedResult = results.put({
         workspaceId,
         workspaceRoot: workspace.root,
-        tool: "read_file",
+        tool: toolNames.read,
         path: input.path,
         label: input.path,
         summary,
@@ -537,7 +586,7 @@ function createMcpServer(
 
       return {
         ...response,
-        _meta: { tool: "read_file", resultId: storedResult.id },
+        _meta: { tool: toolNames.read, resultId: storedResult.id },
         structuredContent: {
           workspaceId,
           path: input.path,
@@ -550,11 +599,11 @@ function createMcpServer(
 
   registerAppTool(
     server,
-    "write_file",
+    toolNames.write,
     {
       title: "Write file",
       description:
-        "Create or completely overwrite a file inside an open workspace. Prefer edit_file for targeted changes to existing files. Call open_workspace first and pass workspaceId.",
+        `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
       inputSchema: {
         workspaceId: z
           .string()
@@ -604,7 +653,7 @@ function createMcpServer(
       const storedResult = results.put({
         workspaceId,
         workspaceRoot: workspace.root,
-        tool: "write_file",
+        tool: toolNames.write,
         path: input.path,
         label: input.path,
         summary,
@@ -616,7 +665,7 @@ function createMcpServer(
 
       return {
         ...response,
-        _meta: { tool: "write_file", resultId: storedResult.id },
+        _meta: { tool: toolNames.write, resultId: storedResult.id },
         structuredContent: {
           workspaceId,
           path: input.path,
@@ -629,11 +678,11 @@ function createMcpServer(
 
   registerAppTool(
     server,
-    "edit_file",
+    toolNames.edit,
     {
       title: "Edit file",
       description:
-        "Edit one file inside an open workspace by replacing exact text blocks. Prefer this over write_file for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.",
+        `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
       inputSchema: {
         workspaceId: z
           .string()
@@ -692,7 +741,7 @@ function createMcpServer(
       const storedResult = results.put({
         workspaceId,
         workspaceRoot: workspace.root,
-        tool: "edit_file",
+        tool: toolNames.edit,
         path: input.path,
         label: input.path,
         summary: {
@@ -712,7 +761,7 @@ function createMcpServer(
 
       return {
         content: editContent,
-        _meta: { tool: "edit_file", resultId: storedResult.id },
+        _meta: { tool: toolNames.edit, resultId: storedResult.id },
         structuredContent: {
           workspaceId,
           status: "applied",
@@ -727,11 +776,11 @@ function createMcpServer(
   if (!config.minimalTools) {
     registerAppTool(
       server,
-      "grep_files",
+      toolNames.grep,
       {
         title: "Grep files",
         description:
-          "Search file contents inside an open workspace. Use this before broad reads when looking for symbols, text, or usage sites. Respects the underlying Pi grep behavior, including project ignore rules. Call open_workspace first and pass workspaceId.",
+          "Search file contents inside an open workspace. Use this before broad reads when looking for symbols, text, or usage sites. Respects project ignore rules. Call open_workspace first and pass workspaceId.",
         inputSchema: {
           workspaceId: z
             .string()
@@ -785,7 +834,7 @@ function createMcpServer(
         const storedResult = results.put({
           workspaceId,
           workspaceRoot: workspace.root,
-          tool: "grep_files",
+          tool: toolNames.grep,
           path: input.path,
           label: input.pattern,
           summary,
@@ -794,7 +843,7 @@ function createMcpServer(
 
         return {
           ...response,
-          _meta: { tool: "grep_files", resultId: storedResult.id },
+          _meta: { tool: toolNames.grep, resultId: storedResult.id },
           structuredContent: {
             workspaceId,
             path: input.path,
@@ -807,11 +856,11 @@ function createMcpServer(
 
     registerAppTool(
       server,
-      "find_files",
+      toolNames.glob,
       {
         title: "Find files",
         description:
-          "Find files by glob pattern inside an open workspace. Use this to discover filenames or narrow file sets before reading. Respects the underlying Pi find behavior, including project ignore rules. Call open_workspace first and pass workspaceId.",
+          "Find files by glob pattern inside an open workspace. Use this to discover filenames or narrow file sets before reading. Respects project ignore rules. Call open_workspace first and pass workspaceId.",
         inputSchema: {
           workspaceId: z
             .string()
@@ -862,7 +911,7 @@ function createMcpServer(
         const storedResult = results.put({
           workspaceId,
           workspaceRoot: workspace.root,
-          tool: "find_files",
+          tool: toolNames.glob,
           path: input.path,
           label: input.pattern,
           summary,
@@ -871,7 +920,7 @@ function createMcpServer(
 
         return {
           ...response,
-          _meta: { tool: "find_files", resultId: storedResult.id },
+          _meta: { tool: toolNames.glob, resultId: storedResult.id },
           structuredContent: {
             workspaceId,
             path: input.path,
@@ -884,7 +933,7 @@ function createMcpServer(
 
     registerAppTool(
       server,
-      "list_directory",
+      toolNames.ls,
       {
         title: "List directory",
         description:
@@ -931,7 +980,7 @@ function createMcpServer(
         const storedResult = results.put({
           workspaceId,
           workspaceRoot: workspace.root,
-          tool: "list_directory",
+          tool: toolNames.ls,
           path: input.path,
           label: input.path,
           summary,
@@ -940,7 +989,7 @@ function createMcpServer(
 
         return {
           ...response,
-          _meta: { tool: "list_directory", resultId: storedResult.id },
+          _meta: { tool: toolNames.ls, resultId: storedResult.id },
           structuredContent: {
             workspaceId,
             path: input.path,
@@ -954,12 +1003,12 @@ function createMcpServer(
 
   registerAppTool(
     server,
-    "run_shell",
+    toolNames.shell,
     {
-      title: "Run shell",
+      title: config.toolNaming === "short" ? "Bash" : "Run shell",
       description: config.minimalTools
-        ? "Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, grep_files, find_files, and list_directory are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use run_shell to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use edit_file for targeted changes and write_file for new files or full rewrites. Prefer read_file for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication."
-        : "Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use run_shell to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use edit_file for targeted changes and write_file for new files or full rewrites. Prefer read_file, grep_files, find_files, and list_directory for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.",
+        ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
+        : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
       inputSchema: {
         workspaceId: z
           .string()
@@ -967,7 +1016,7 @@ function createMcpServer(
         command: z
           .string()
           .describe(
-            "Shell command to run. Must not create or modify project files; use edit_file or write_file for file changes.",
+            `Shell command to run. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
           ),
         workingDirectory: z
           .string()
@@ -1023,7 +1072,7 @@ function createMcpServer(
       const storedResult = results.put({
         workspaceId,
         workspaceRoot: workspace.root,
-        tool: "run_shell",
+        tool: toolNames.shell,
         path: workingDirectory,
         label: input.command,
         summary,
@@ -1032,7 +1081,7 @@ function createMcpServer(
 
       return {
         ...response,
-        _meta: { tool: "run_shell", resultId: storedResult.id },
+        _meta: { tool: toolNames.shell, resultId: storedResult.id },
         structuredContent: {
           workspaceId,
           path: workingDirectory,

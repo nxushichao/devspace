@@ -35,7 +35,7 @@ function getGitShortSha() {
 }
 
 function getReleaseId() {
-  if (process.env.PI_ON_MCP_RELEASE_ID) return process.env.PI_ON_MCP_RELEASE_ID;
+  if (process.env.DEVSPACE_RELEASE_ID) return process.env.DEVSPACE_RELEASE_ID;
 
   const timestamp = new Date()
     .toISOString()

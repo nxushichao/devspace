@@ -6,18 +6,18 @@ import { assertAllowedPath, expandHomePath, resolveAllowedPath } from "./roots.j
 const home = homedir();
 
 assert.equal(expandHomePath("~"), home);
-assert.equal(expandHomePath("~/personal/pi-on-mcp"), resolve(home, "personal", "pi-on-mcp"));
+assert.equal(expandHomePath("~/personal/devspace"), resolve(home, "personal", "devspace"));
 assert.equal(expandHomePath("~user/project"), "~user/project");
 assert.equal(expandHomePath("$HOME/project"), "$HOME/project");
 
 assert.equal(
-  assertAllowedPath("~/personal/pi-on-mcp", [join(home, "personal")]),
-  resolve(home, "personal", "pi-on-mcp"),
+  assertAllowedPath("~/personal/devspace", [join(home, "personal")]),
+  resolve(home, "personal", "devspace"),
 );
 
 assert.equal(
-  assertAllowedPath("~/personal/pi-on-mcp", ["~/personal"]),
-  resolve(home, "personal", "pi-on-mcp"),
+  assertAllowedPath("~/personal/devspace", ["~/personal"]),
+  resolve(home, "personal", "devspace"),
 );
 
 assert.equal(

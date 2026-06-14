@@ -21,7 +21,14 @@ type ToolName =
   | "grep_files"
   | "find_files"
   | "list_directory"
-  | "run_shell";
+  | "run_shell"
+  | "read"
+  | "write"
+  | "edit"
+  | "grep"
+  | "glob"
+  | "ls"
+  | "bash";
 
 type LoadState = "idle" | "loading" | "loaded" | "error";
 type HostContext = NonNullable<ReturnType<App["getHostContext"]>>;
@@ -63,13 +70,40 @@ function isToolName(value: unknown): value is ToolName {
     value === "grep_files" ||
     value === "find_files" ||
     value === "list_directory" ||
-    value === "run_shell"
+    value === "run_shell" ||
+    value === "read" ||
+    value === "write" ||
+    value === "edit" ||
+    value === "grep" ||
+    value === "glob" ||
+    value === "ls" ||
+    value === "bash"
   );
 }
 
 function toolNameFromMeta(result: CallToolResult): ToolName | undefined {
   const meta = result._meta as Record<string, unknown> | undefined;
   return isToolName(meta?.tool) ? meta.tool : undefined;
+}
+
+function isReadTool(tool: ToolName): boolean {
+  return tool === "read_file" || tool === "read";
+}
+
+function isWriteTool(tool: ToolName): boolean {
+  return tool === "write_file" || tool === "write";
+}
+
+function isEditTool(tool: ToolName): boolean {
+  return tool === "edit_file" || tool === "edit";
+}
+
+function isSearchTool(tool: ToolName): boolean {
+  return tool === "grep_files" || tool === "find_files" || tool === "grep" || tool === "glob";
+}
+
+function isShellTool(tool: ToolName): boolean {
+  return tool === "run_shell" || tool === "bash";
 }
 
 function resultIdFromMeta(result: CallToolResult): string | undefined {
@@ -328,7 +362,7 @@ function ToolPayloadView({
     return <StatusLine message={errorMessage ?? "Unable to load details."} tone="error" />;
   }
 
-  if (card.tool === "edit_file" || card.tool === "write_file") {
+  if (isEditTool(card.tool) || isWriteTool(card.tool)) {
     const patch = payload?.patch || payload?.diff;
     if (!patch) return <StatusLine message="Diff payload is not available." />;
 
@@ -338,7 +372,7 @@ function ToolPayloadView({
   const text = payloadText(payload);
   if (!text) return <StatusLine message="No details available." />;
 
-  if (card.tool === "read_file") {
+  if (isReadTool(card.tool)) {
     return (
       <FilePayload
         path={card.path ?? "file"}
@@ -417,7 +451,7 @@ function DiffPayload({
 function SummaryBadges({ card }: { card: ToolResultCard }) {
   const summary = card.summary ?? {};
 
-  if (card.tool === "edit_file" || card.tool === "write_file") {
+  if (isEditTool(card.tool) || isWriteTool(card.tool)) {
     return (
       <span className="stats" aria-label="Diff statistics">
         <span className="add">+{String(summary.additions ?? 0)}</span>
@@ -430,11 +464,11 @@ function SummaryBadges({ card }: { card: ToolResultCard }) {
     return <span className="badge">{String(summary.agentsFiles ?? 0)} AGENTS</span>;
   }
 
-  if (card.tool === "run_shell") {
+  if (isShellTool(card.tool)) {
     return <span className="badge">{String(summary.lines ?? 0)} lines</span>;
   }
 
-  if (card.tool === "grep_files" || card.tool === "find_files") {
+  if (isSearchTool(card.tool)) {
     return <span className="badge">{String(summary.lines ?? 0)} lines</span>;
   }
 
@@ -462,27 +496,34 @@ function getToolDisplay(card: ToolResultCard): {
     case "open_workspace":
       return { icon: <FolderIcon />, title: "Workspace", label, tone: "workspace" };
     case "read_file":
+    case "read":
       return { icon: <FileIcon />, title: "Read File", label, tone: "read" };
     case "write_file":
+    case "write":
       return { icon: <FilePlusIcon />, title: "Write File", label, tone: "write" };
     case "edit_file":
+    case "edit":
       return { icon: <EditIcon />, title: "Edit File", label, tone: "edit" };
     case "grep_files":
-      return { icon: <SearchIcon />, title: "Grep Files", label, tone: "search" };
+    case "grep":
+      return { icon: <SearchIcon />, title: "Grep", label, tone: "search" };
     case "find_files":
-      return { icon: <FilesIcon />, title: "Find Files", label, tone: "search" };
+    case "glob":
+      return { icon: <FilesIcon />, title: "Glob", label, tone: "search" };
     case "list_directory":
+    case "ls":
       return { icon: <ListIcon />, title: "List Directory", label, tone: "directory" };
     case "run_shell":
-      return { icon: <TerminalIcon />, title: "Run Shell", label, tone: "shell" };
+    case "bash":
+      return { icon: <TerminalIcon />, title: "Bash", label, tone: "shell" };
   }
 }
 
 function getToolLabel(card: ToolResultCard): string {
   if (card.path) return card.path;
   if (card.root) return card.root;
-  if (card.tool === "run_shell") return String(card.summary?.command ?? card.tool);
-  if (card.tool === "grep_files" || card.tool === "find_files") {
+  if (isShellTool(card.tool)) return String(card.summary?.command ?? card.tool);
+  if (isSearchTool(card.tool)) {
     return String(card.summary?.pattern ?? card.tool);
   }
 

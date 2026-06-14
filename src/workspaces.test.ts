@@ -6,7 +6,7 @@ import { loadConfig } from "./config.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsNotice, WorkspaceRegistry } from "./workspaces.js";
 
-const root = await mkdtemp(join(tmpdir(), "pi-on-mcp-workspace-test-"));
+const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));
 
 try {
   await writeFile(join(root, "AGENTS.md"), "root instructions\n");
@@ -15,7 +15,7 @@ try {
   await writeFile(join(root, "nested", "file.txt"), "hello\n");
 
   const config = loadConfig({
-    PI_ON_MCP_ALLOWED_ROOTS: root,
+    DEVSPACE_ALLOWED_ROOTS: root,
     PORT: "1",
   });
   const registry = new WorkspaceRegistry(config);
