@@ -8,7 +8,6 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   isEditTool,
   isExpandableCard,
-  isOpenProjectTool,
   isPatchTool,
   isReadTool,
   isReviewTool,
@@ -229,7 +228,7 @@ async function renderPayloadIfNeeded(): Promise<void> {
     return;
   }
 
-  if (isOpenProjectTool(card.tool)) {
+  if (card.tool === "open_project") {
     renderPrePayload(target, workspacePayloadText(card), "open_project");
     return;
   }
@@ -354,7 +353,7 @@ function renderSummaryBadge(card: ToolResultCard): HTMLElement {
     return stats;
   }
 
-  if (isOpenProjectTool(card.tool)) {
+  if (card.tool === "open_project") {
     const agentsFiles = summaryNumber(summary, "agentsFiles") ?? 0;
     const skills = summaryNumber(summary, "skills") ?? 0;
     const group = element("span", { className: "badge-group" });
@@ -466,7 +465,7 @@ function workspacePayloadText(card: ToolResultCard): string {
   const availableAgentsFiles = card.availableAgentsFiles ?? [];
   const skills = card.skills ?? [];
   const lines = [
-    card.projectId || card.workspaceId ? `Project: ${card.projectId ?? card.workspaceId}` : undefined,
+    card.projectId ? `Project: ${card.projectId}` : undefined,
     card.root ? `Root: ${card.root}` : undefined,
     skills.length > 0
       ? `Skills: ${skills.map((skill) => skill.name ?? skill.path ?? "unnamed").join(", ")}`
@@ -517,7 +516,6 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
 
   switch (card.tool) {
     case "open_project":
-    case "open_workspace":
       return { icon: folderIcon(), title: "Project", label, tone: "workspace" };
     case "read":
       return { icon: fileIcon(), title: "Read File", label, tone: "read" };
