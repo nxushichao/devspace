@@ -14,6 +14,82 @@ projects through DevSpace.
 DevSpace does not create the public tunnel for you. Use Cloudflare Tunnel,
 ngrok, Pinggy, Tailscale Funnel, or your own HTTPS reverse proxy.
 
+## Windows One-Click Setup For A Local Checkout
+
+When developing DevSpace from this repository on Windows, double-click
+`setup-devspace.bat`, or run:
+
+```bash
+npm run setup:windows
+```
+
+The script checks Node, npm, Git, and Bash; installs dependencies when they are
+missing; builds the project; and creates or updates the DevSpace configuration.
+It preserves existing configuration values where possible and preserves the
+Owner password unless you explicitly reset it. On a first run, the parent folder
+of this checkout becomes the allowed project root.
+
+Pass an allowed root and public HTTPS base URL when setting up a remote MCP
+connection. Enter the base URL without `/mcp`:
+
+```powershell
+npm run setup:windows -- -AllowedRoot "E:\code" -PublicBaseUrl "https://your-tunnel-host.example.com"
+```
+
+Useful optional switches are `-Port 7676`, `-ForceInstall`, `-SkipBuild`,
+`-ResetToken`, and `-ShowOwnerToken`. If no public base URL is set, the local
+server still works but a remote MCP client cannot connect until you configure an
+HTTPS tunnel URL.
+
+## Windows Desktop Control Center
+
+The local checkout includes an Electron desktop control center. Double-click
+`start-devspace-desktop.bat`, or run:
+
+```bash
+npm run desktop
+```
+
+The desktop app can select allowed project roots, set the local port and public
+HTTPS base URL, save the DevSpace configuration, run `doctor`, show recent
+service output, and start or stop the DevSpace process. Its custom icon is used
+in the window, taskbar, and system tray. Minimizing or closing the window hides
+it to the tray; the tray menu can show the window, start or stop the managed
+service, or exit the app. A process started in a terminal is displayed as an
+external service and cannot be stopped by the desktop app.
+
+The **Reset Owner password** action rotates the local owner token and revokes all
+issued OAuth access and refresh tokens. The new value is shown only for the
+current desktop session so it can be stored securely. A service managed by the
+desktop app restarts automatically; an externally started service must be
+restarted from its original terminal before it can use the new value.
+
+Three Windows release formats are available:
+
+```bash
+# One self-extracting EXE for direct sending; slower first launch.
+npm run desktop:portable
+
+# Full directory package; unzip it, then run win-unpacked/DevSpace Desktop.exe.
+npm run desktop:unpacked
+
+# NSIS installer with install location, desktop shortcut, and Start menu entry.
+npm run desktop:installer
+```
+
+The portable output is `release/DevSpace Desktop-<version>-portable.exe`; the
+unpacked output is `release/win-unpacked/`; and the installer is named like
+`release/DevSpace Desktop-<version>-installer-x64.exe`. The portable package
+contains the Electron application, DevSpace server, production dependencies,
+and the matching Node runtime. It is larger than the installer and extracts to a
+temporary directory on each launch.
+
+Git and Git Bash (or WSL) are still required only for DevSpace shell and Git
+operations. The desktop app itself opens without them and its environment
+diagnostic reports what is missing. Unsigned executables can trigger Windows
+SmartScreen on another computer; code signing with a trusted certificate is
+required to remove that publisher warning.
+
 ## Install And Configure
 
 Run:

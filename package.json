@@ -21,15 +21,72 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && npm run build:app && tsc -p tsconfig.build.json",
+    "build": "npm run clean && npm run build:icon && npm run build:app && tsc -p tsconfig.build.json && npm run build:desktop-assets && npm run build:desktop-runtime",
+    "build:icon": "node scripts/generate-app-icon.mjs",
     "build:app": "vite build",
+    "build:desktop-assets": "node scripts/copy-desktop-assets.mjs",
+    "build:desktop-runtime": "node scripts/copy-desktop-runtime.mjs",
     "dev": "node scripts/dev-server.mjs",
+    "desktop": "npm run build && electron dist/desktop/main.js",
+    "clean:release": "node scripts/clean-release.mjs",
+    "desktop:package:unpacked": "electron-builder --win dir",
+    "desktop:portable": "npm run build && npm run clean:release && npm run desktop:package:unpacked && node scripts/build-portable-exe.mjs --cleanup",
+    "desktop:unpacked": "npm run build && npm run clean:release && npm run desktop:package:unpacked",
+    "desktop:installer": "npm run build && npm run clean:release && node scripts/build-installer.mjs",
+    "desktop:dist": "npm run desktop:portable",
+    "desktop:dir": "npm run desktop:unpacked",
+    "setup:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/setup-devspace.ps1",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js serve",
     "test": "tsx src/config.test.ts && tsx src/ui/card-types.test.ts && tsx src/ui/patch-display.test.ts && tsx src/apply-patch.test.ts && tsx src/process-platform.test.ts && tsx src/process-sessions.test.ts && tsx src/roots.test.ts && tsx src/skills.test.ts && tsx src/workspaces.test.ts && tsx src/review-checkpoints.test.ts && tsx src/oauth-store.test.ts && tsx src/cli.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "keywords": [],
+  "build": {
+    "appId": "com.devspace.desktop",
+    "productName": "DevSpace Desktop",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "extraMetadata": {
+      "main": "dist/desktop/main.js"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "dist/**/*",
+      "build/icon.ico",
+      "package.json"
+    ],
+    "asar": false,
+    "npmRebuild": false,
+    "win": {
+      "icon": "build/icon.ico",
+      "signExecutable": false,
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DevSpace Desktop",
+      "artifactName": "${productName}-${version}-installer-${arch}.${ext}"
+    }
+  },
+  "keywords": [
+    "mcp",
+    "electron",
+    "desktop"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
@@ -55,6 +112,8 @@
     "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",
     "@vitejs/plugin-react": "^6.0.2",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.22.3",
     "typescript": "^6.0.3",
     "vite": "^8.0.14"

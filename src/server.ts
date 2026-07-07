@@ -1548,6 +1548,8 @@ export function createServer(config = loadConfig()): RunningServer {
 
     res.on("finish", () => {
       const path = requestPath(req);
+      // 健康检查由桌面端定时触发，不属于 MCP 或工具调用日志，始终跳过。
+      if (path === "/healthz") return;
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 

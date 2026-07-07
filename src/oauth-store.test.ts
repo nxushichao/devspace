@@ -24,6 +24,7 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
+  testBulkTokenRevocation(join(root, "bulk-revocation"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -177,6 +178,28 @@ function testTransactionalTokenRotation(stateDir: string): void {
     );
     assert.equal(store.getAccessToken("losing-access-hash"), undefined);
     assert.equal(store.getRefreshToken("losing-refresh-hash"), undefined);
+  } finally {
+    store.close();
+  }
+}
+
+function testBulkTokenRevocation(stateDir: string): void {
+  const store = new SqliteOAuthStore(stateDir);
+  try {
+    const client = new SqliteOAuthClientsStore(store, oauthConfig.allowedRedirectHosts).registerClient({
+      redirect_uris: [redirectUri],
+    });
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    store.saveTokenPair({
+      accessTokenHash: "bulk-access-hash",
+      accessToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
+      refreshTokenHash: "bulk-refresh-hash",
+      refreshToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
+    });
+
+    assert.deepEqual(store.revokeAllTokens(), { accessTokens: 1, refreshTokens: 1 });
+    assert.equal(store.getAccessToken("bulk-access-hash"), undefined);
+    assert.equal(store.getRefreshToken("bulk-refresh-hash"), undefined);
   } finally {
     store.close();
   }

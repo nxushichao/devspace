@@ -248,3 +248,33 @@ npm test
 npm run build
 npm run start
 ```
+
+On Windows, `setup-devspace.bat` provides a one-click alternative for checking
+prerequisites, installing dependencies, building the project, and configuring
+DevSpace. The same flow is available from a terminal with:
+
+```bash
+npm run setup:windows
+```
+
+The Windows desktop control center can be opened by double-clicking
+`start-devspace-desktop.bat`, or by running:
+
+```bash
+npm run desktop
+```
+
+It provides service status, start/stop controls, configuration editing, project
+folder selection, environment diagnostics, and recent server output. The custom
+app icon is used in the window and system tray; minimizing or closing the window
+hides it to the tray. It can rotate the Owner password and revoke existing OAuth
+sessions, then restarts a desktop-managed service automatically.
+
+Windows release commands are explicit: `npm run desktop:portable` produces one
+self-extracting EXE, `npm run desktop:unpacked` produces `release/win-unpacked/`,
+and `npm run desktop:installer` produces an NSIS installer. All formats include
+a matching Node runtime for DevSpace. Git and Git Bash are only required when
+recipients need Shell or Git operations.
+
+See the [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
+for supported setup parameters and public tunnel configuration.

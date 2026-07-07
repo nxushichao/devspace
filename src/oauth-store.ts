@@ -177,6 +177,17 @@ export class SqliteOAuthStore {
     this.database.sqlite.prepare("delete from oauth_refresh_tokens where token_hash = ?").run(tokenHash);
   }
 
+  revokeAllTokens(): { accessTokens: number; refreshTokens: number } {
+    // Owner password 轮换时必须同步失效所有已签发令牌，避免旧会话继续访问本机工作区。
+    const revoke = this.database.sqlite.transaction(() => {
+      const accessTokens = this.database.sqlite.prepare("delete from oauth_access_tokens").run().changes;
+      const refreshTokens = this.database.sqlite.prepare("delete from oauth_refresh_tokens").run().changes;
+      return { accessTokens, refreshTokens };
+    });
+
+    return revoke.immediate();
+  }
+
   close(): void {
     this.database.close();
   }
