@@ -180,6 +180,7 @@ devspace doctor
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
 - [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
+- [Native File Download](https://github.com/Waishnav/devspace/blob/main/docs/artifact-exchange.md)
 - [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
 - [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)
 
@@ -200,10 +201,10 @@ explicit, inspectable tools.
 
 ## Built by Waishnav
 
-I'm Waishnav, I like building opinionated products and tools, and DevSpace is one example of that.
-This year, I started my journey to build a single-person and multiple-agents company doing multiple millions in
-revenue. If you want to watch the failures, wins, lessons, and everything in
-between, come hang out with me on [X](https://x.com/wshxnv).
+I'm Waishnav. I like building opinionated products and tools, and Artifacts is one example.
+
+This year, I began my journey to build a one-person, multi-agent company capable of generating millions in revenue. If you want to follow the failures, wins, lessons, and everything in between, come hang out with me on [X](https://x.com/wshxnv).
+
 
 ## More from me
 
@@ -248,33 +249,3 @@ npm test
 npm run build
 npm run start
 ```
-
-On Windows, `setup-devspace.bat` provides a one-click alternative for checking
-prerequisites, installing dependencies, building the project, and configuring
-DevSpace. The same flow is available from a terminal with:
-
-```bash
-npm run setup:windows
-```
-
-The Windows desktop control center can be opened by double-clicking
-`start-devspace-desktop.bat`, or by running:
-
-```bash
-npm run desktop
-```
-
-It provides service status, start/stop controls, configuration editing, project
-folder selection, environment diagnostics, and recent server output. The custom
-app icon is used in the window and system tray; minimizing or closing the window
-hides it to the tray. It can rotate the Owner password and revoke existing OAuth
-sessions, then restarts a desktop-managed service automatically.
-
-Windows release commands are explicit: `npm run desktop:portable` produces one
-self-extracting EXE, `npm run desktop:unpacked` produces `release/win-unpacked/`,
-and `npm run desktop:installer` produces an NSIS installer. All formats include
-a matching Node runtime for DevSpace. Git and Git Bash are only required when
-recipients need Shell or Git operations.
-
-See the [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
-for supported setup parameters and public tunnel configuration.

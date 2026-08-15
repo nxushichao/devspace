@@ -4,3 +4,4 @@ releases/
 release/
 .env
 *.log
+.idea

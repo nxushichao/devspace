@@ -24,7 +24,7 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
-  testBulkTokenRevocation(join(root, "bulk-revocation"));
+  testRevokeAllTokens(join(root, "revoke-all"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -184,23 +184,27 @@ function testTransactionalTokenRotation(stateDir: string): void {
   }
 }
 
-function testBulkTokenRevocation(stateDir: string): void {
+function testRevokeAllTokens(stateDir: string): void {
   const store = new SqliteOAuthStore(stateDir);
   try {
     const client = new SqliteOAuthClientsStore(store, oauthConfig.allowedRedirectHosts).registerClient({
       redirect_uris: [redirectUri],
     });
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+
+    // 密码轮换必须同时撤销访问令牌和刷新令牌，但保留已注册客户端。
     store.saveTokenPair({
-      accessTokenHash: "bulk-access-hash",
+      accessTokenHash: "revoke-all-access-hash",
       accessToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
-      refreshTokenHash: "bulk-refresh-hash",
+      refreshTokenHash: "revoke-all-refresh-hash",
       refreshToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },
     });
 
     assert.deepEqual(store.revokeAllTokens(), { accessTokens: 1, refreshTokens: 1 });
-    assert.equal(store.getAccessToken("bulk-access-hash"), undefined);
-    assert.equal(store.getRefreshToken("bulk-refresh-hash"), undefined);
+    assert.equal(store.getAccessToken("revoke-all-access-hash"), undefined);
+    assert.equal(store.getRefreshToken("revoke-all-refresh-hash"), undefined);
+    assert.equal(store.getClient(client.client_id)?.client_id, client.client_id);
+    assert.deepEqual(store.revokeAllTokens(), { accessTokens: 0, refreshTokens: 0 });
   } finally {
     store.close();
   }

@@ -18,7 +18,15 @@ import express from "express";
 import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
+import {
+  isArtifactDownloadSupportedPlatform,
+  registerArtifactTools,
+} from "./artifact-tools.js";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
+import {
+  createOpenAIIncomingArtifactAdapter,
+  type IncomingArtifactAdapter,
+} from "./incoming-artifacts.js";
 import {
   logEvent,
   requestIp,
@@ -36,8 +44,13 @@ import {
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import {
+  McpSessionRegistry,
+  type McpSessionCloseResult,
+} from "./mcp-sessions.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
@@ -49,6 +62,10 @@ import {
 } from "./local-agent-availability.js";
 
 type Transport = StreamableHTTPServerTransport;
+// MCP clients can reconnect without closing the previous transport. Bound stale
+// session retention so abandoned MCP servers do not accumulate for the life of the process.
+const MCP_SESSION_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -74,7 +91,7 @@ interface RunningServer {
   app: ReturnType<typeof createMcpExpressApp>;
   config: ServerConfig;
   localAgentProviders: LocalAgentProviderAvailability[];
-  close(): void;
+  close(): Promise<void>;
 }
 
 type ToolContent =
@@ -170,13 +187,16 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
+  const artifactInstruction = config.artifactsEnabled && isArtifactDownloadSupportedPlatform()
+    ? " When the user supplies or generates a file that is not present on the DevSpace host, use download_artifact with its native file value, the existing workspace ID, and a suitable relative destination path chosen from the user's request and project structure. The tool refuses to overwrite an existing destination and returns the normalized workspace-relative path. Use normal workspace tools when explicit inspection, replacement, movement, renaming, or deletion is needed. Do not recreate binary files with write/edit calls or place signed URLs, native file objects, base64 content, or invented host paths in shell commands or logs."
+    : "";
   const showChangesInstruction =
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${showChangesInstruction}`;
+    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -189,7 +209,7 @@ function serverInstructions(config: ServerConfig): string {
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChangesInstruction}`;
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -679,6 +699,7 @@ function createMcpServer(
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   localAgentProviders: LocalAgentProviderAvailability[],
+  incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
 ): McpServer {
   const server = new McpServer(
     {
@@ -856,6 +877,7 @@ function createMcpServer(
             root: workspace.root,
             path: workspace.root,
             summary: {
+              mode: workspace.mode,
               agentsFiles: loadedAgentsFiles.length,
               availableAgentsFiles: availableAgentsFileOutputs.length,
               skills: visibleSkills.length,
@@ -1206,6 +1228,7 @@ function createMcpServer(
                 additions: applied.additions,
                 removals: applied.removals,
               },
+              files: applied.files,
               payload: { patch: applied.patch },
             },
           },
@@ -1583,10 +1606,27 @@ function createMcpServer(
     registerCodexProcessTools(server, config, workspaces, processSessions);
   }
 
+  if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
+    registerArtifactTools(server, {
+      config,
+      workspaces,
+      incomingArtifactAdapters,
+    });
+  }
+
   return server;
 }
 
-export function createServer(config = loadConfig()): RunningServer {
+export interface CreateServerOptions {
+  incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
+}
+
+export function createServer(
+  config = loadConfig(),
+  options: CreateServerOptions = {},
+): RunningServer {
+  const incomingArtifactAdapters = options.incomingArtifactAdapters
+    ?? [createOpenAIIncomingArtifactAdapter()];
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
@@ -1594,7 +1634,7 @@ export function createServer(config = loadConfig()): RunningServer {
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const transports = new Map<string, Transport>();
+  const transports = new McpSessionRegistry<Transport>();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
@@ -1611,6 +1651,37 @@ export function createServer(config = loadConfig()): RunningServer {
     ? getLocalAgentProviderAvailabilitySnapshot()
     : [];
 
+  const logSessionCloseResults = (
+    reason: "idle_timeout" | "server_shutdown",
+    results: McpSessionCloseResult[],
+  ) => {
+    for (const result of results) {
+      if (result.error) {
+        logEvent(config.logging, "warn", "mcp_session_close_failed", {
+          reason,
+          sessionIdPrefix: sessionIdPrefix(result.sessionId),
+          error:
+            result.error instanceof Error
+              ? result.error.message
+              : String(result.error),
+        });
+        continue;
+      }
+
+      logEvent(config.logging, "info", "mcp_session_closed", {
+        reason,
+        sessionIdPrefix: sessionIdPrefix(result.sessionId),
+      });
+    }
+  };
+
+  const sessionCleanupTimer = setInterval(() => {
+    void transports
+      .closeIdle(MCP_SESSION_IDLE_TIMEOUT_MS)
+      .then((results) => logSessionCloseResults("idle_timeout", results));
+  }, MCP_SESSION_CLEANUP_INTERVAL_MS);
+  sessionCleanupTimer.unref();
+
   if (config.logging.trustProxy) {
     app.set("trust proxy", true);
   }
@@ -1622,8 +1693,6 @@ export function createServer(config = loadConfig()): RunningServer {
 
     res.on("finish", () => {
       const path = requestPath(req);
-      // 健康检查由桌面端定时触发，不属于 MCP 或工具调用日志，始终跳过。
-      if (path === "/healthz") return;
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 
@@ -1716,7 +1785,7 @@ export function createServer(config = loadConfig()): RunningServer {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
-            if (transport) transports.set(newSessionId, transport);
+            if (transport) transports.register(newSessionId, transport);
             logEvent(config.logging, "info", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
@@ -1727,9 +1796,9 @@ export function createServer(config = loadConfig()): RunningServer {
 
         transport.onclose = () => {
           const closedSessionId = transport?.sessionId;
-          if (closedSessionId) {
-            transports.delete(closedSessionId);
+          if (closedSessionId && transports.remove(closedSessionId)) {
             logEvent(config.logging, "info", "mcp_session_closed", {
+              reason: "transport_close",
               sessionIdPrefix: sessionIdPrefix(closedSessionId),
             });
           }
@@ -1741,6 +1810,7 @@ export function createServer(config = loadConfig()): RunningServer {
           reviewCheckpoints,
           processSessions,
           localAgentProviders,
+          incomingArtifactAdapters,
         );
         await server.connect(transport);
       } else {
@@ -1760,17 +1830,21 @@ export function createServer(config = loadConfig()): RunningServer {
     }
   });
 
-  let closed = false;
+  let closePromise: Promise<void> | undefined;
   return {
     app,
     config,
     localAgentProviders,
     close: () => {
-      if (closed) return;
-      closed = true;
-      processSessions.shutdown();
-      oauthProvider.close();
-      workspaceStore.close?.();
+      closePromise ??= (async () => {
+        clearInterval(sessionCleanupTimer);
+        const results = await transports.closeAll();
+        logSessionCloseResults("server_shutdown", results);
+        processSessions.shutdown();
+        oauthProvider.close();
+        workspaceStore.close?.();
+      })();
+      return closePromise;
     },
   };
 }
@@ -1795,17 +1869,30 @@ if (await isMainModule()) {
     console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
     console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
     console.log(`trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`);
+    const artifactDownloadStatus = !config.artifactsEnabled
+      ? "disabled"
+      : isArtifactDownloadSupportedPlatform()
+        ? "enabled"
+        : `unsupported on ${process.platform}`;
+    console.log(`native artifact download: ${artifactDownloadStatus}`);
     if (config.subagents) {
       console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
     }
   });
 
-  const shutdown = () => {
-    httpServer.close(() => {
-      close();
-      process.exit(0);
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await shutdownHttpServer(httpServer, close);
+    process.exit(0);
+  };
+  const handleShutdown = () => {
+    void shutdown().catch((error) => {
+      console.error("devspace shutdown failed", error);
+      process.exit(1);
     });
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", handleShutdown);
+  process.once("SIGTERM", handleShutdown);
 }
