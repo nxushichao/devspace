@@ -25,7 +25,9 @@ function Require-Command {
 function Invoke-Npm {
   param([string[]]$Arguments)
 
-  & npm @Arguments
+  # Windows PowerShell 可能优先解析 npm.ps1，数组 splatting 在部分 npm shim 上会丢失首字符；
+  # 显式调用 npm.cmd，确保 setup 的 install/ci 参数按原样传递。
+  & npm.cmd @Arguments
   if ($LASTEXITCODE -ne 0) {
     throw "npm $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
   }
@@ -214,7 +216,7 @@ if ($nodeVersion -lt [System.Version]"22.19.0" -or $nodeVersion -ge [System.Vers
 }
 
 $gitBashPath = Get-GitBashPath
-$npmVersionText = (& npm --version).Trim()
+$npmVersionText = (& npm.cmd --version).Trim()
 $gitVersionText = (& git --version).Trim()
 Write-Host "Node: $nodeVersionText"
 Write-Host "npm:  $npmVersionText"
@@ -223,10 +225,23 @@ Write-Host "Bash: $gitBashPath"
 Write-Host ""
 
 $nodeModulesPath = Join-Path $projectRoot "node_modules"
-if ($ForceInstall -or -not (Test-Path -LiteralPath $nodeModulesPath)) {
-  # 使用锁文件进行可复现安装；npm 的 postinstall 会同时修复 node-pty 权限。
-  if (Test-Path -LiteralPath (Join-Path $projectRoot "package-lock.json")) {
-    Write-Host "Installing dependencies from package-lock.json..." -ForegroundColor Cyan
+$electronPackagePath = Join-Path $nodeModulesPath "electron\package.json"
+$electronBuilderPackagePath = Join-Path $nodeModulesPath "electron-builder\package.json"
+$desktopDependenciesReady = (Test-Path -LiteralPath $electronPackagePath) -and (Test-Path -LiteralPath $electronBuilderPackagePath)
+$dependenciesNeedInstall = $ForceInstall -or -not (Test-Path -LiteralPath $nodeModulesPath) -or -not $desktopDependenciesReady
+$packageLockPath = Join-Path $projectRoot "package-lock.json"
+$packageLockExists = Test-Path -LiteralPath $packageLockPath
+
+if ($packageLockExists) {
+  # Desktop 层会新增 Electron 构建依赖。即使复制升级时已有 node_modules，也要先将上游旧 lock
+  # 与新的 package.json 对齐，避免后续手动执行 npm ci 时因 lock 缺少 Desktop 依赖而失败。
+  Write-Host "Synchronizing package-lock.json with desktop dependencies..." -ForegroundColor Cyan
+  Invoke-Npm -Arguments @("install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund")
+}
+
+if ($dependenciesNeedInstall) {
+  if ($packageLockExists) {
+    Write-Host "Installing dependencies from synchronized package-lock.json..." -ForegroundColor Cyan
     Invoke-Npm -Arguments @("ci", "--include=dev")
   } else {
     Write-Host "Installing dependencies..." -ForegroundColor Cyan
@@ -298,7 +313,7 @@ Write-Utf8NoBom -Path $authPath -Content (($authConfig | ConvertTo-Json -Depth 4
 
 Write-Host ""
 Write-Host "Verifying DevSpace configuration..." -ForegroundColor Cyan
-& npx --no-install tsx src/cli.ts doctor
+& npx.cmd --no-install tsx src/cli.ts doctor
 if ($LASTEXITCODE -ne 0) {
   throw "DevSpace diagnostic failed with exit code $LASTEXITCODE."
 }

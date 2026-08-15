@@ -45,6 +45,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 1, name: "workspace-state" },
       { version: 2, name: "oauth-state" },
       { version: 3, name: "local-agent-sessions" },
+      { version: 4, name: "workspace-conversation-bindings" },
     ]);
   } finally {
     database.close();
@@ -192,7 +193,7 @@ function testRevokeAllTokens(stateDir: string): void {
     });
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
 
-    // 密码轮换必须同时撤销访问令牌和刷新令牌，但保留已注册客户端。
+    // 密码轮换只撤销已签发令牌，已注册 OAuth 客户端仍需保留，便于用户重新授权。
     store.saveTokenPair({
       accessTokenHash: "revoke-all-access-hash",
       accessToken: { clientId: client.client_id, scopes: ["devspace"], expiresAt },

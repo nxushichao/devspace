@@ -178,7 +178,7 @@ export class SqliteOAuthStore {
   }
 
   revokeAllTokens(): { accessTokens: number; refreshTokens: number } {
-    // Owner password 轮换时必须同步失效所有已签发令牌，避免旧会话继续访问本机工作区。
+    // Owner password 轮换时必须原子撤销全部访问令牌和刷新令牌，避免旧客户端继续访问本机工作区。
     const revoke = this.database.sqlite.transaction(() => {
       const accessTokens = this.database.sqlite.prepare("delete from oauth_access_tokens").run().changes;
       const refreshTokens = this.database.sqlite.prepare("delete from oauth_refresh_tokens").run().changes;
