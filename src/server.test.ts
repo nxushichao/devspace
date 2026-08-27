@@ -10,11 +10,37 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
-import { createMcpServer } from "./server.js";
+import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
+
+test("HTTP proxy trust stays bounded for local and explicitly proxied deployments", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-proxy-test-"));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const baseEnvironment = {
+    DEVSPACE_CONFIG_DIR: join(root, ".config"),
+    DEVSPACE_ALLOWED_ROOTS: root,
+    DEVSPACE_STATE_DIR: join(root, ".state"),
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+  };
+
+  const localServer = createServer(loadConfig(baseEnvironment));
+  assert.equal(localServer.app.get("trust proxy"), "loopback");
+  await localServer.close();
+
+  const proxiedServer = createServer(loadConfig({
+    ...baseEnvironment,
+    DEVSPACE_STATE_DIR: join(root, ".proxied-state"),
+    DEVSPACE_TRUST_PROXY: "1",
+  }));
+  assert.equal(proxiedServer.app.get("trust proxy"), 1);
+  await proxiedServer.close();
+});
 
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const context = await fixture(t);

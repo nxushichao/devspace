@@ -178,6 +178,8 @@ npx @waishnav/devspace serve
 | `DEVSPACE_LOG_SHELL_COMMANDS` | `0` |
 | `DEVSPACE_TRUST_PROXY` | `0` |
 
+DevSpace always trusts loopback proxies so local desktop tunnels and reverse proxies can provide the client IP without enabling Express's permissive `trust proxy=true` mode. Set `DEVSPACE_TRUST_PROXY=1` only when DevSpace is behind exactly one non-loopback ingress proxy; this expands Express proxy trust to one hop. Keep direct access to the DevSpace listener blocked in that configuration.
+
 Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
 Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command

@@ -305,9 +305,9 @@ function sendJsonRpcError(
   });
 }
 
-function requestLogFields(req: Request, config: ServerConfig): Record<string, unknown> {
+function requestLogFields(req: Request): Record<string, unknown> {
   return {
-    ip: requestIp(req, config.logging.trustProxy),
+    ip: requestIp(req),
     host: req.header("host"),
     userAgent: req.header("user-agent"),
     origin: req.header("origin"),
@@ -1726,9 +1726,9 @@ export function createServer(
   }, MCP_SESSION_CLEANUP_INTERVAL_MS);
   sessionCleanupTimer.unref();
 
-  if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
-  }
+  // 默认仅信任本机回环代理，兼容桌面端隧道/反向代理，同时避免 trust proxy=true 导致客户端可伪造来源 IP。
+  // 显式开启 DEVSPACE_TRUST_PROXY 时仅信任第一跳代理，保留现有配置入口但限制信任范围。
+  app.set("trust proxy", config.logging.trustProxy ? 1 : "loopback");
 
   app.use((req, res, next) => {
     const requestId = randomUUID();
@@ -1746,7 +1746,7 @@ export function createServer(
         path,
         status: res.statusCode,
         durationMs: Math.round(performance.now() - startedAt),
-        ...requestLogFields(req, config),
+        ...requestLogFields(req),
       });
     });
 
@@ -1802,7 +1802,7 @@ export function createServer(
         method: req.method,
         path: requestPath(req),
         reason: "invalid_oauth_resource",
-        ...requestLogFields(req, config),
+        ...requestLogFields(req),
       });
       sendJsonRpcError(res, 401, -32001, "Unauthorized");
       return;
@@ -1833,7 +1833,7 @@ export function createServer(
             logEvent(config.logging, "info", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
-              ...requestLogFields(req, config),
+              ...requestLogFields(req),
             });
           },
         });
@@ -1912,7 +1912,7 @@ if (await isMainModule()) {
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
     console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
     console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
-    console.log(`trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`);
+    console.log(`trust proxy: ${config.logging.trustProxy ? "1 hop" : "loopback only"}`);
     const artifactDownloadStatus = !config.artifactsEnabled
       ? "disabled"
       : isArtifactDownloadSupportedPlatform()
