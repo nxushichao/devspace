@@ -7,15 +7,19 @@ import { fileURLToPath } from "node:url";
 import {
   generateOwnerToken,
   loadDevspaceFiles,
+  setDevspaceConfigValues,
   writeDevspaceAuth,
-  writeDevspaceConfig,
 } from "../user-config.js";
 import { terminateProcessTree } from "../process-platform.js";
 import { loadConfig } from "../config.js";
 import { SqliteOAuthStore } from "../oauth-store.js";
+import { getLocalAgentProviderAvailabilitySnapshot } from "../local-agent-availability.js";
+import { buildLocalAgentProviderStatuses } from "../local-agent-catalog.js";
+import { LOCAL_AGENT_PROVIDERS } from "../local-agent-profiles.js";
 import type {
   DesktopConfigInput,
   DesktopConfigView,
+  DesktopProviderInput,
   DesktopDiagnostics,
   DesktopLogCleanup,
   DesktopOwnerPasswordReset,
@@ -161,25 +165,121 @@ async function normalizeAllowedRoots(value: unknown): Promise<string[]> {
   return roots;
 }
 
+function normalizeBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${label} 必须是布尔值。`);
+  return value;
+}
+
+function normalizeString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} 不能为空。`);
+  return value.trim();
+}
+
+function normalizeStringList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${label} 必须是列表。`);
+  return Array.from(new Set(value.map((entry) => {
+    if (typeof entry !== "string") throw new Error(`${label} 中包含无效值。`);
+    return entry.trim();
+  }).filter(Boolean)));
+}
+
+function normalizeProvider(value: unknown): DesktopProviderInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Subagent Provider 配置无效。");
+  }
+  const provider = value as Record<string, unknown>;
+  const id = provider.id;
+  if (typeof id !== "string" || !LOCAL_AGENT_PROVIDERS.includes(id as (typeof LOCAL_AGENT_PROVIDERS)[number])) {
+    throw new Error(`不支持的 Subagent Provider：${String(id)}`);
+  }
+  const model = typeof provider.model === "string" && provider.model.trim() ? provider.model.trim() : undefined;
+  const effort = typeof provider.effort === "string" && provider.effort.trim() ? provider.effort.trim() : undefined;
+  return {
+    id: id as DesktopProviderInput["id"],
+    enabled: normalizeBoolean(provider.enabled, `${id} enabled`),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+  };
+}
+
 async function normalizeConfigInput(input: DesktopConfigInput): Promise<DesktopConfigInput> {
+  if (input.toolMode !== "codex" && input.toolMode !== "claude") {
+    throw new Error("工具模式必须是 codex 或 claude。");
+  }
+  if (!["silent", "error", "warn", "info", "debug"].includes(input.logging.level)) {
+    throw new Error("日志等级无效。");
+  }
+  if (input.logging.format !== "json" && input.logging.format !== "pretty") {
+    throw new Error("日志格式无效。");
+  }
+
+  const providers = input.subagents.providers.map(normalizeProvider);
+  if (new Set(providers.map((provider) => provider.id)).size !== providers.length) {
+    throw new Error("Subagent Provider 不能重复配置。");
+  }
+
   return {
     allowedRoots: await normalizeAllowedRoots(input.allowedRoots),
     port: normalizePort(input.port),
     publicBaseUrl: normalizePublicBaseUrl(input.publicBaseUrl),
+    toolMode: input.toolMode,
+    uiEnabled: normalizeBoolean(input.uiEnabled, "UI enabled"),
+    skills: {
+      enabled: normalizeBoolean(input.skills.enabled, "Skills enabled"),
+      paths: normalizeStringList(input.skills.paths, "Skills 路径"),
+      agentDir: normalizeString(input.skills.agentDir, "Agent 目录"),
+    },
+    subagents: {
+      enabled: normalizeBoolean(input.subagents.enabled, "Subagents enabled"),
+      providers,
+    },
+    logging: {
+      level: input.logging.level,
+      format: input.logging.format,
+      requests: normalizeBoolean(input.logging.requests, "HTTP 请求日志"),
+      assets: normalizeBoolean(input.logging.assets, "静态资源日志"),
+      toolCalls: normalizeBoolean(input.logging.toolCalls, "Tool 调用日志"),
+      shellCommands: normalizeBoolean(input.logging.shellCommands, "Shell 命令日志"),
+    },
   };
 }
 
 function readConfigView(): DesktopConfigView {
   const files = loadDevspaceFiles();
-  const port = normalizePort(files.config.port ?? 7676);
-  const allowedRoots = Array.isArray(files.config.allowedRoots)
-    ? files.config.allowedRoots.filter((root): root is string => typeof root === "string")
+  const port = normalizePort(files.config.server.port ?? 7676);
+  const allowedRoots = Array.isArray(files.config.workspaces.allowedRoots)
+    ? files.config.workspaces.allowedRoots.filter((root): root is string => typeof root === "string")
     : [];
+  const providerStatuses = buildLocalAgentProviderStatuses(
+    files.config.subagents,
+    getLocalAgentProviderAvailabilitySnapshot(),
+  );
 
   return {
     allowedRoots,
     port,
-    publicBaseUrl: normalizePublicBaseUrl(files.config.publicBaseUrl),
+    publicBaseUrl: normalizePublicBaseUrl(files.config.server.publicBaseUrl),
+    toolMode: files.config.tools.mode,
+    uiEnabled: files.config.ui.enabled,
+    skills: {
+      enabled: files.config.skills.enabled,
+      paths: files.config.skills.paths,
+      agentDir: files.config.skills.agentDir,
+    },
+    subagents: {
+      enabled: files.config.subagents.enabled,
+      providers: providerStatuses.map((provider) => ({
+        id: provider.id,
+        enabled: provider.enabled,
+        available: provider.available,
+        usable: provider.usable,
+        model: provider.model,
+        effort: provider.effort,
+        reason: provider.reason,
+        note: provider.note,
+      })),
+    },
+    logging: { ...files.config.logging },
     configPath: files.configPath,
     authConfigured: Boolean(files.auth.ownerToken?.trim()),
   };
@@ -380,6 +480,27 @@ async function getSnapshot(): Promise<DesktopSnapshot> {
         allowedRoots: [],
         port: 7676,
         publicBaseUrl: null,
+        toolMode: "codex",
+        uiEnabled: true,
+        skills: { enabled: true, paths: [], agentDir: "~/.codex" },
+        subagents: {
+          enabled: false,
+          providers: LOCAL_AGENT_PROVIDERS.map((id) => ({
+            id,
+            enabled: false,
+            available: false,
+            usable: false,
+            reason: "配置读取失败",
+          })),
+        },
+        logging: {
+          level: "info",
+          format: "json",
+          requests: true,
+          assets: false,
+          toolCalls: true,
+          shellCommands: false,
+        },
         configPath: "",
         authConfigured: false,
       },
@@ -505,10 +626,6 @@ async function assertServerBuild(): Promise<void> {
 function serverEnvironment(): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   delete environment.ELECTRON_RUN_AS_NODE;
-
-  // 桌面端只需要 MCP/GPT 工具调用记录；保留显式环境变量以便高级用户自行开启 HTTP 访问日志。
-  if (environment.DEVSPACE_LOG_REQUESTS === undefined) environment.DEVSPACE_LOG_REQUESTS = "0";
-  if (environment.DEVSPACE_LOG_TOOL_CALLS === undefined) environment.DEVSPACE_LOG_TOOL_CALLS = "1";
   return environment;
 }
 
@@ -648,14 +765,27 @@ async function saveConfig(input: DesktopConfigInput): Promise<DesktopSnapshot> {
   const currentConfig = readConfigView();
   const files = loadDevspaceFiles();
   const wasManagedRunning = Boolean(serverProcess) && await requestHealth(currentConfig.port);
+  const reconnectRequired = currentConfig.toolMode !== normalized.toolMode;
 
-  writeDevspaceConfig({
-    ...files.config,
-    host: "127.0.0.1",
-    port: normalized.port,
-    allowedRoots: normalized.allowedRoots,
-    publicBaseUrl: normalized.publicBaseUrl,
-  });
+  // 使用 JSONC 的定点编辑接口，只修改桌面配置中心负责的字段，保留用户注释和未来新增配置。
+  setDevspaceConfigValues([
+    { path: ["server", "host"], value: "127.0.0.1" },
+    { path: ["server", "port"], value: normalized.port },
+    { path: ["server", "publicBaseUrl"], value: normalized.publicBaseUrl },
+    { path: ["workspaces", "allowedRoots"], value: normalized.allowedRoots },
+    { path: ["tools", "mode"], value: normalized.toolMode },
+    { path: ["ui", "enabled"], value: normalized.uiEnabled },
+    { path: ["skills", "enabled"], value: normalized.skills.enabled },
+    { path: ["skills", "paths"], value: normalized.skills.paths },
+    { path: ["skills", "agentDir"], value: normalized.skills.agentDir },
+    { path: ["subagents"], value: normalized.subagents },
+    { path: ["logging", "level"], value: normalized.logging.level },
+    { path: ["logging", "format"], value: normalized.logging.format },
+    { path: ["logging", "requests"], value: normalized.logging.requests },
+    { path: ["logging", "assets"], value: normalized.logging.assets },
+    { path: ["logging", "toolCalls"], value: normalized.logging.toolCalls },
+    { path: ["logging", "shellCommands"], value: normalized.logging.shellCommands },
+  ]);
 
   if (!files.auth.ownerToken?.trim()) {
     writeDevspaceAuth({ ownerToken: generateOwnerToken() });
@@ -663,17 +793,27 @@ async function saveConfig(input: DesktopConfigInput): Promise<DesktopSnapshot> {
 
   lastMessage = wasManagedRunning
     ? "配置已保存，正在重启由桌面端管理的服务以应用新配置。"
-    : "配置已保存。";
+    : reconnectRequired
+      ? "配置已保存。工具模式已变化，请在 ChatGPT 中断开并重新连接 DevSpace MCP。"
+      : "配置已保存。";
   broadcastStatus();
 
   if (wasManagedRunning) {
     await stopService();
-    return startService();
+    const restarted = await startService();
+    if (reconnectRequired) {
+      lastMessage = "配置已应用并完成服务重启。工具模式已变化，请在 ChatGPT 中断开并重新连接 DevSpace MCP。";
+      broadcastStatus();
+      return getSnapshot();
+    }
+    return restarted;
   }
 
   const snapshot = await getSnapshot();
   if (snapshot.state === "running" && !snapshot.managedByDesktop) {
-    lastMessage = "配置已保存；当前检测到外部启动的服务，重启该服务后配置才会生效。";
+    lastMessage = reconnectRequired
+      ? "配置已保存；当前是外部启动的服务，请重启该服务，并在 ChatGPT 中重新连接 DevSpace MCP。"
+      : "配置已保存；当前检测到外部启动的服务，重启该服务后配置才会生效。";
   }
   broadcastStatus();
   return getSnapshot();

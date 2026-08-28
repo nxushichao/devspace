@@ -24,6 +24,21 @@ const rootList = requiredElement<HTMLElement>("root-list");
 const addRootButton = requiredElement<HTMLButtonElement>("add-root-button");
 const portInput = requiredElement<HTMLInputElement>("port-input");
 const publicBaseUrlInput = requiredElement<HTMLInputElement>("public-base-url-input");
+const toolModeSelect = requiredElement<HTMLSelectElement>("tool-mode-select");
+const uiEnabledInput = requiredElement<HTMLInputElement>("ui-enabled-input");
+const subagentsEnabledInput = requiredElement<HTMLInputElement>("subagents-enabled-input");
+const providerGrid = requiredElement<HTMLElement>("provider-grid");
+const skillsEnabledInput = requiredElement<HTMLInputElement>("skills-enabled-input");
+const agentDirInput = requiredElement<HTMLInputElement>("agent-dir-input");
+const chooseAgentDirButton = requiredElement<HTMLButtonElement>("choose-agent-dir-button");
+const skillPathList = requiredElement<HTMLElement>("skill-path-list");
+const addSkillPathButton = requiredElement<HTMLButtonElement>("add-skill-path-button");
+const logLevelSelect = requiredElement<HTMLSelectElement>("log-level-select");
+const logFormatSelect = requiredElement<HTMLSelectElement>("log-format-select");
+const logRequestsInput = requiredElement<HTMLInputElement>("log-requests-input");
+const logAssetsInput = requiredElement<HTMLInputElement>("log-assets-input");
+const logToolCallsInput = requiredElement<HTMLInputElement>("log-tool-calls-input");
+const logShellCommandsInput = requiredElement<HTMLInputElement>("log-shell-commands-input");
 const configPathValue = requiredElement<HTMLElement>("config-path-value");
 const authValue = requiredElement<HTMLElement>("auth-value");
 const ownerPasswordResult = requiredElement<HTMLElement>("owner-password-result");
@@ -31,6 +46,11 @@ const ownerPasswordValue = requiredElement<HTMLElement>("owner-password-value");
 const logOutput = requiredElement<HTMLPreElement>("log-output");
 const diagnosticOutput = requiredElement<HTMLPreElement>("diagnostic-output");
 const notice = requiredElement<HTMLElement>("notice");
+const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-tab-target]"));
+const tabPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-tab-panel]"));
+
+type DesktopTabId = "status" | "config" | "subagents" | "skills" | "logs";
+const DESKTOP_TAB_IDS: readonly DesktopTabId[] = ["status", "config", "subagents", "skills", "logs"];
 
 let currentSnapshot: DesktopSnapshot | null = null;
 let busy = false;
@@ -40,6 +60,55 @@ function requiredElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
   if (!element) throw new Error(`Missing desktop control: ${id}`);
   return element as T;
+}
+
+function isDesktopTabId(value: string | undefined): value is DesktopTabId {
+  return value !== undefined && DESKTOP_TAB_IDS.includes(value as DesktopTabId);
+}
+
+function tabFromHash(): DesktopTabId | null {
+  const value = window.location.hash.replace(/^#/, "");
+  return isDesktopTabId(value) ? value : null;
+}
+
+function activateTab(tabId: DesktopTabId, options: { focus?: boolean; updateHash?: boolean } = {}): void {
+  const activeButton = tabButtons.find((button) => button.dataset.tabTarget === tabId);
+  if (!activeButton) return;
+
+  for (const button of tabButtons) {
+    const selected = button === activeButton;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  }
+
+  for (const panel of tabPanels) {
+    panel.hidden = panel.dataset.tabPanel !== tabId;
+  }
+
+  if (options.updateHash !== false && window.location.hash !== `#${tabId}`) {
+    // 使用 hash 保存当前页签，但不触发页面滚动或完整导航。
+    window.history.replaceState(null, "", `#${tabId}`);
+  }
+  if (options.focus) activeButton.focus();
+}
+
+function handleTabKeydown(event: KeyboardEvent, currentButton: HTMLButtonElement): void {
+  const currentIndex = tabButtons.indexOf(currentButton);
+  if (currentIndex === -1) return;
+
+  let nextIndex: number | null = null;
+  if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabButtons.length;
+  if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabButtons.length) % tabButtons.length;
+  if (event.key === "Home") nextIndex = 0;
+  if (event.key === "End") nextIndex = tabButtons.length - 1;
+  if (nextIndex === null) return;
+
+  event.preventDefault();
+  const nextButton = tabButtons[nextIndex];
+  const nextTab = nextButton?.dataset.tabTarget;
+  if (nextButton && isDesktopTabId(nextTab)) {
+    activateTab(nextTab, { focus: true });
+  }
 }
 
 function stateText(snapshot: DesktopSnapshot): string {
@@ -84,6 +153,9 @@ function setBusy(nextBusy: boolean): void {
   openConfigButton.disabled = nextBusy;
   addRootButton.disabled = nextBusy;
   rootList.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button").forEach((element) => {
+    element.disabled = nextBusy;
+  });
+  document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("[data-config-control]").forEach((element) => {
     element.disabled = nextBusy;
   });
 }
@@ -159,14 +231,154 @@ function renderRoots(roots: string[]): void {
   values.forEach((root) => rootList.append(createRootRow(root)));
 }
 
+function createSkillPathRow(value = ""): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "path-row";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "skill-path-input";
+  input.value = value;
+  input.placeholder = "例如 E:\\agents\\skills";
+  input.dataset.configControl = "true";
+
+  const browseButton = document.createElement("button");
+  browseButton.type = "button";
+  browseButton.className = "secondary compact";
+  browseButton.textContent = "选择";
+  browseButton.dataset.configControl = "true";
+  browseButton.addEventListener("click", async () => {
+    try {
+      const selected = await window.devspaceDesktop.chooseDirectory();
+      if (selected) input.value = selected;
+    } catch (error) {
+      showNotice(errorMessage(error), "error");
+    }
+  });
+
+  const removeButton = document.createElement("button");
+  removeButton.type = "button";
+  removeButton.className = "icon-button";
+  removeButton.textContent = "×";
+  removeButton.title = "移除此 Skills 目录";
+  removeButton.dataset.configControl = "true";
+  removeButton.addEventListener("click", () => row.remove());
+
+  row.append(input, browseButton, removeButton);
+  return row;
+}
+
+function renderSkillPaths(paths: string[]): void {
+  skillPathList.replaceChildren();
+  paths.forEach((path) => skillPathList.append(createSkillPathRow(path)));
+}
+
+const PROVIDER_LABELS: Record<DesktopSnapshot["config"]["subagents"]["providers"][number]["id"], string> = {
+  codex: "Codex",
+  claude: "Claude",
+  opencode: "OpenCode",
+  pi: "Pi",
+  cursor: "Cursor",
+  copilot: "Copilot",
+  grok: "Grok",
+};
+
+function renderProviders(providers: DesktopSnapshot["config"]["subagents"]["providers"]): void {
+  providerGrid.replaceChildren();
+  for (const provider of providers) {
+    const card = document.createElement("section");
+    card.className = "provider-card";
+    card.dataset.providerId = provider.id;
+
+    const head = document.createElement("div");
+    head.className = "provider-head";
+
+    const toggle = document.createElement("label");
+    toggle.className = "toggle-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "provider-enabled-input";
+    checkbox.checked = provider.enabled;
+    checkbox.dataset.configControl = "true";
+    const name = document.createElement("span");
+    name.className = "provider-name";
+    name.textContent = PROVIDER_LABELS[provider.id];
+    toggle.append(checkbox, name);
+
+    const status = document.createElement("span");
+    status.className = `provider-status ${provider.available ? "available" : "unavailable"}`;
+    status.textContent = provider.available
+      ? provider.usable ? "可用 · 已启用" : "已检测到"
+      : `不可用 · ${provider.reason ?? "未通过检测"}`;
+    head.append(toggle, status);
+
+    const fields = document.createElement("div");
+    fields.className = "provider-fields";
+    const modelLabel = document.createElement("label");
+    modelLabel.innerHTML = "<span>Model（可选）</span>";
+    const modelInput = document.createElement("input");
+    modelInput.type = "text";
+    modelInput.className = "provider-model-input";
+    modelInput.value = provider.model ?? "";
+    modelInput.placeholder = "使用 Provider 默认值";
+    modelInput.dataset.configControl = "true";
+    modelLabel.append(modelInput);
+
+    const effortLabel = document.createElement("label");
+    effortLabel.innerHTML = "<span>Effort（可选）</span>";
+    const effortInput = document.createElement("input");
+    effortInput.type = "text";
+    effortInput.className = "provider-effort-input";
+    effortInput.value = provider.effort ?? "";
+    effortInput.placeholder = "例如 high";
+    effortInput.dataset.configControl = "true";
+    effortLabel.append(effortInput);
+
+    fields.append(modelLabel, effortLabel);
+    card.append(head, fields);
+    providerGrid.append(card);
+  }
+}
+
 function readConfigInput(): DesktopConfigInput {
   const allowedRoots = Array.from(rootList.querySelectorAll<HTMLInputElement>(".root-input"))
     .map((input) => input.value.trim())
     .filter(Boolean);
-  const port = Number(portInput.value);
-  const publicBaseUrl = publicBaseUrlInput.value.trim() || null;
+  const skillPaths = Array.from(skillPathList.querySelectorAll<HTMLInputElement>(".skill-path-input"))
+    .map((input) => input.value.trim())
+    .filter(Boolean);
+  const providers = Array.from(providerGrid.querySelectorAll<HTMLElement>(".provider-card")).map((card) => {
+    const id = card.dataset.providerId as DesktopConfigInput["subagents"]["providers"][number]["id"];
+    const enabled = card.querySelector<HTMLInputElement>(".provider-enabled-input")?.checked ?? false;
+    const model = card.querySelector<HTMLInputElement>(".provider-model-input")?.value.trim() || undefined;
+    const effort = card.querySelector<HTMLInputElement>(".provider-effort-input")?.value.trim() || undefined;
+    return { id, enabled, ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+  });
 
-  return { allowedRoots, port, publicBaseUrl };
+  return {
+    allowedRoots,
+    port: Number(portInput.value),
+    publicBaseUrl: publicBaseUrlInput.value.trim() || null,
+    toolMode: toolModeSelect.value as DesktopConfigInput["toolMode"],
+    uiEnabled: uiEnabledInput.checked,
+    skills: {
+      enabled: skillsEnabledInput.checked,
+      paths: skillPaths,
+      agentDir: agentDirInput.value.trim(),
+    },
+    subagents: {
+      enabled: subagentsEnabledInput.checked,
+      providers,
+    },
+    logging: {
+      level: logLevelSelect.value as DesktopConfigInput["logging"]["level"],
+      format: logFormatSelect.value as DesktopConfigInput["logging"]["format"],
+      requests: logRequestsInput.checked,
+      assets: logAssetsInput.checked,
+      toolCalls: logToolCallsInput.checked,
+      shellCommands: logShellCommandsInput.checked,
+    },
+  };
 }
 
 function renderOutput(output: string[]): void {
@@ -199,6 +411,19 @@ function renderSnapshot(snapshot: DesktopSnapshot, options: { preserveForm?: boo
     renderRoots(snapshot.config.allowedRoots);
     portInput.value = String(snapshot.config.port);
     publicBaseUrlInput.value = snapshot.config.publicBaseUrl ?? "";
+    toolModeSelect.value = snapshot.config.toolMode;
+    uiEnabledInput.checked = snapshot.config.uiEnabled;
+    subagentsEnabledInput.checked = snapshot.config.subagents.enabled;
+    renderProviders(snapshot.config.subagents.providers);
+    skillsEnabledInput.checked = snapshot.config.skills.enabled;
+    agentDirInput.value = snapshot.config.skills.agentDir;
+    renderSkillPaths(snapshot.config.skills.paths);
+    logLevelSelect.value = snapshot.config.logging.level;
+    logFormatSelect.value = snapshot.config.logging.format;
+    logRequestsInput.checked = snapshot.config.logging.requests;
+    logAssetsInput.checked = snapshot.config.logging.assets;
+    logToolCallsInput.checked = snapshot.config.logging.toolCalls;
+    logShellCommandsInput.checked = snapshot.config.logging.shellCommands;
     initialized = true;
   }
 
@@ -251,7 +476,7 @@ saveButton.addEventListener("click", () => withBusy(async () => {
   const input = readConfigInput();
   const snapshot = await window.devspaceDesktop.saveConfig(input);
   renderSnapshot(snapshot, { preserveForm: false });
-  showNotice("配置已保存。", "success");
+  showNotice(snapshot.message ?? "配置已保存。", "success");
 }));
 
 diagnosticsButton.addEventListener("click", () => withBusy(async () => {
@@ -306,6 +531,31 @@ clearLogsButton.addEventListener("click", () => {
 addRootButton.addEventListener("click", () => {
   rootList.append(createRootRow());
 });
+
+addSkillPathButton.addEventListener("click", () => {
+  skillPathList.append(createSkillPathRow());
+});
+
+chooseAgentDirButton.addEventListener("click", () => {
+  void withBusy(async () => {
+    const selected = await window.devspaceDesktop.chooseDirectory();
+    if (selected) agentDirInput.value = selected;
+  });
+});
+
+for (const button of tabButtons) {
+  button.addEventListener("click", () => {
+    const tabId = button.dataset.tabTarget;
+    if (isDesktopTabId(tabId)) activateTab(tabId);
+  });
+  button.addEventListener("keydown", (event) => handleTabKeydown(event, button));
+}
+
+window.addEventListener("hashchange", () => {
+  activateTab(tabFromHash() ?? "status", { updateHash: false });
+});
+
+activateTab(tabFromHash() ?? "status", { updateHash: false });
 
 window.devspaceDesktop.onStatus((snapshot) => {
   renderSnapshot(snapshot, { preserveForm: true });

@@ -25,41 +25,11 @@ function Require-Command {
 function Invoke-Npm {
   param([string[]]$Arguments)
 
-  # Windows PowerShell 可能优先解析 npm.ps1，数组 splatting 在部分 npm shim 上会丢失首字符；
-  # 显式调用 npm.cmd，确保 setup 的 install/ci 参数按原样传递。
+  # Windows PowerShell 可能优先解析 npm.ps1；显式调用 npm.cmd，确保数组参数不会被 shim 错误拆解。
   & npm.cmd @Arguments
   if ($LASTEXITCODE -ne 0) {
     throw "npm $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
   }
-}
-
-function Write-Utf8NoBom {
-  param(
-    [string]$Path,
-    [string]$Content
-  )
-
-  [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
-}
-
-function Read-JsonObject {
-  param([string]$Path)
-
-  try {
-    $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-  } catch {
-    throw "Unable to read JSON file $Path. $($_.Exception.Message)"
-  }
-
-  if ($null -eq $parsed -or $parsed -isnot [System.Management.Automation.PSCustomObject]) {
-    throw "JSON file $Path must contain an object."
-  }
-
-  $result = [ordered]@{}
-  foreach ($property in $parsed.PSObject.Properties) {
-    $result[$property.Name] = $property.Value
-  }
-  return $result
 }
 
 function Get-StringValues {
@@ -126,7 +96,7 @@ function Resolve-Port {
 }
 
 function Normalize-PublicBaseUrl {
-  param([string]$Value)
+  param([AllowNull()][string]$Value)
 
   if ([string]::IsNullOrWhiteSpace($Value)) {
     return $null
@@ -171,26 +141,40 @@ function Get-GitBashPath {
   throw "Bash was not found. Install Git for Windows with Git Bash enabled, or install WSL."
 }
 
-function Get-OwnerToken {
+function Invoke-DesktopConfig {
   param(
-    [string]$AuthPath,
-    [switch]$Reset
+    [string]$Command,
+    [AllowNull()][string]$Payload
   )
 
-  if ((Test-Path -LiteralPath $AuthPath) -and -not $Reset) {
-    $auth = Read-JsonObject -Path $AuthPath
-    $existingToken = [string]$auth["ownerToken"]
-    if (-not [string]::IsNullOrWhiteSpace($existingToken)) {
-      return $existingToken
+  $tsxCommand = Join-Path $projectRoot "node_modules\.bin\tsx.cmd"
+  if (-not (Test-Path -LiteralPath $tsxCommand)) {
+    throw "tsx was not installed correctly: $tsxCommand"
+  }
+
+  $previousPayload = $env:DEVSPACE_DESKTOP_SETUP_CONFIG
+  try {
+    if ($null -eq $Payload) {
+      Remove-Item Env:DEVSPACE_DESKTOP_SETUP_CONFIG -ErrorAction SilentlyContinue
+    } else {
+      $env:DEVSPACE_DESKTOP_SETUP_CONFIG = $Payload
+    }
+
+    $output = (& $tsxCommand "scripts/desktop-config.ts" $Command | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+      throw "Desktop config helper failed with exit code $LASTEXITCODE."
+    }
+    if ([string]::IsNullOrWhiteSpace($output)) {
+      throw "Desktop config helper returned no result."
+    }
+    return $output | ConvertFrom-Json
+  } finally {
+    if ($null -eq $previousPayload) {
+      Remove-Item Env:DEVSPACE_DESKTOP_SETUP_CONFIG -ErrorAction SilentlyContinue
+    } else {
+      $env:DEVSPACE_DESKTOP_SETUP_CONFIG = $previousPayload
     }
   }
-
-  $token = (& node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))").Trim()
-  if ([string]::IsNullOrWhiteSpace($token)) {
-    throw "Failed to generate the DevSpace Owner password."
-  }
-
-  return $token
 }
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -227,15 +211,18 @@ Write-Host ""
 $nodeModulesPath = Join-Path $projectRoot "node_modules"
 $electronPackagePath = Join-Path $nodeModulesPath "electron\package.json"
 $electronBuilderPackagePath = Join-Path $nodeModulesPath "electron-builder\package.json"
-$desktopDependenciesReady = (Test-Path -LiteralPath $electronPackagePath) -and (Test-Path -LiteralPath $electronBuilderPackagePath)
+$jsoncParserPackagePath = Join-Path $nodeModulesPath "jsonc-parser\package.json"
+$desktopDependenciesReady =
+  (Test-Path -LiteralPath $electronPackagePath) -and
+  (Test-Path -LiteralPath $electronBuilderPackagePath) -and
+  (Test-Path -LiteralPath $jsoncParserPackagePath)
 $dependenciesNeedInstall = $ForceInstall -or -not (Test-Path -LiteralPath $nodeModulesPath) -or -not $desktopDependenciesReady
 $packageLockPath = Join-Path $projectRoot "package-lock.json"
 $packageLockExists = Test-Path -LiteralPath $packageLockPath
 
 if ($packageLockExists) {
-  # Desktop 层会新增 Electron 构建依赖。即使复制升级时已有 node_modules，也要先将上游旧 lock
-  # 与新的 package.json 对齐，避免后续手动执行 npm ci 时因 lock 缺少 Desktop 依赖而失败。
-  Write-Host "Synchronizing package-lock.json with desktop dependencies..." -ForegroundColor Cyan
+  # 官方 main 与 Desktop 层都会持续新增依赖。每次 setup 先同步 lock，保证复制升级后 npm ci 可重复执行。
+  Write-Host "Synchronizing package-lock.json with current dependencies..." -ForegroundColor Cyan
   Invoke-Npm -Arguments @("install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund")
 }
 
@@ -251,32 +238,14 @@ if ($dependenciesNeedInstall) {
   Write-Host "Dependencies already exist. Use -ForceInstall to reinstall them." -ForegroundColor DarkGray
 }
 
-if (-not $SkipBuild) {
-  Write-Host "Building DevSpace..." -ForegroundColor Cyan
-  Invoke-Npm -Arguments @("run", "build")
-}
-
-# 读取并保留已有的扩展配置，只更新本脚本负责的连接与访问范围字段。
-$devspaceDir = if ([string]::IsNullOrWhiteSpace($env:DEVSPACE_CONFIG_DIR)) {
-  Join-Path $env:USERPROFILE ".devspace"
-} else {
-  $env:DEVSPACE_CONFIG_DIR
-}
-New-Item -ItemType Directory -Force -Path $devspaceDir | Out-Null
-
-$configPath = Join-Path $devspaceDir "config.json"
-$existingConfig = if (Test-Path -LiteralPath $configPath) {
-  Read-JsonObject -Path $configPath
-} else {
-  [ordered]@{}
-}
-
+# 读取配置时复用官方迁移逻辑；若仍是 v1.0 的 config.json，会在这里安全迁移为 versioned config.jsonc。
+$existingState = Invoke-DesktopConfig -Command "read" -Payload $null
 $defaultAllowedRoot = Split-Path -Parent $projectRoot
 if ($PSBoundParameters.ContainsKey("AllowedRoot")) {
   $resolvedAllowedRoots = Resolve-AllowedRoots -Roots $AllowedRoot
-} elseif ($existingConfig.Contains("allowedRoots")) {
+} elseif ($existingState.allowedRoots) {
   try {
-    $resolvedAllowedRoots = Resolve-AllowedRoots -Roots (Get-StringValues $existingConfig["allowedRoots"])
+    $resolvedAllowedRoots = Resolve-AllowedRoots -Roots (Get-StringValues $existingState.allowedRoots)
   } catch {
     Write-Warning "Existing allowedRoots cannot be used. Falling back to $defaultAllowedRoot."
     $resolvedAllowedRoots = Resolve-AllowedRoots -Roots @($defaultAllowedRoot)
@@ -285,31 +254,30 @@ if ($PSBoundParameters.ContainsKey("AllowedRoot")) {
   $resolvedAllowedRoots = Resolve-AllowedRoots -Roots @($defaultAllowedRoot)
 }
 
-$existingPort = if ($existingConfig.Contains("port")) { $existingConfig["port"] } else { $null }
-$resolvedPort = Resolve-Port -IsSpecified ($PSBoundParameters.ContainsKey("Port")) -RequestedPort $Port -ExistingPort $existingPort
+$resolvedPort = Resolve-Port `
+  -IsSpecified ($PSBoundParameters.ContainsKey("Port")) `
+  -RequestedPort $Port `
+  -ExistingPort $existingState.port
 
-$existingPublicBaseUrl = if ($existingConfig.Contains("publicBaseUrl")) { [string]$existingConfig["publicBaseUrl"] } else { $null }
+$existingPublicBaseUrl = if ($null -ne $existingState.publicBaseUrl) { [string]$existingState.publicBaseUrl } else { $null }
 $resolvedPublicBaseUrl = if ($PSBoundParameters.ContainsKey("PublicBaseUrl")) {
   Normalize-PublicBaseUrl -Value $PublicBaseUrl
 } else {
   Normalize-PublicBaseUrl -Value $existingPublicBaseUrl
 }
 
-$nextConfig = [ordered]@{}
-foreach ($entry in $existingConfig.GetEnumerator()) {
-  $nextConfig[$entry.Key] = $entry.Value
+$payload = [ordered]@{
+  allowedRoots = @($resolvedAllowedRoots)
+  port = $resolvedPort
+  publicBaseUrl = $resolvedPublicBaseUrl
+  resetToken = [bool]$ResetToken
+} | ConvertTo-Json -Depth 5 -Compress
+$appliedState = Invoke-DesktopConfig -Command "apply" -Payload $payload
+
+if (-not $SkipBuild) {
+  Write-Host "Building DevSpace..." -ForegroundColor Cyan
+  Invoke-Npm -Arguments @("run", "build")
 }
-$nextConfig["host"] = "127.0.0.1"
-$nextConfig["port"] = $resolvedPort
-$nextConfig["allowedRoots"] = @($resolvedAllowedRoots)
-$nextConfig["publicBaseUrl"] = $resolvedPublicBaseUrl
-
-Write-Utf8NoBom -Path $configPath -Content (($nextConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine)
-
-$authPath = Join-Path $devspaceDir "auth.json"
-$ownerToken = Get-OwnerToken -AuthPath $authPath -Reset:$ResetToken
-$authConfig = [ordered]@{ ownerToken = $ownerToken }
-Write-Utf8NoBom -Path $authPath -Content (($authConfig | ConvertTo-Json -Depth 4) + [Environment]::NewLine)
 
 Write-Host ""
 Write-Host "Verifying DevSpace configuration..." -ForegroundColor Cyan
@@ -320,8 +288,8 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "DevSpace configured successfully." -ForegroundColor Green
-Write-Host "Config: $configPath"
-Write-Host "Auth:   $authPath"
+Write-Host "Config: $($appliedState.configPath)"
+Write-Host "Auth:   $($appliedState.authPath)"
 Write-Host "Allowed roots: $($resolvedAllowedRoots -join ', ')"
 Write-Host "Local MCP URL: http://127.0.0.1:$resolvedPort/mcp"
 
@@ -333,9 +301,12 @@ if ($resolvedPublicBaseUrl) {
 }
 
 if ($ShowOwnerToken) {
-  Write-Host "Owner password: $ownerToken" -ForegroundColor Yellow
+  Write-Host "Owner password: $($appliedState.ownerToken)" -ForegroundColor Yellow
 } else {
   Write-Host "Owner password was preserved or created in auth.json. Use -ShowOwnerToken only when you need to view it." -ForegroundColor DarkGray
+}
+if ($ResetToken) {
+  Write-Warning "Owner password was rotated and issued OAuth access/refresh tokens were revoked. Restart any externally managed DevSpace service."
 }
 
 Write-Host ""
