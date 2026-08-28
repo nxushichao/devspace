@@ -29,7 +29,8 @@ import type {
 
 const DESKTOP_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const HEALTH_CHECK_TIMEOUT_MS = 1_500;
-const START_TIMEOUT_MS = 12_000;
+const START_TIMEOUT_MS = 30_000;
+const EXISTING_SERVICE_GRACE_MS = 3_000;
 const STOP_TIMEOUT_MS = 5_000;
 // 服务输出仅保留最近 100 行，避免高频健康检查日志长期占用桌面端界面和内存。
 const MAX_OUTPUT_LINES = 100;
@@ -42,6 +43,20 @@ let serviceState: DesktopServiceState = "stopped";
 let lastMessage: string | null = null;
 const outputLines: string[] = [];
 let stopRequested = false;
+
+type HealthCheckResult =
+  | { ok: true; status: "healthy" }
+  | {
+      ok: false;
+      status: "connection_refused" | "timeout" | "http_error" | "invalid_response" | "network_error";
+      detail: string;
+    };
+
+interface StartupHealthResult {
+  healthy: boolean;
+  lastHealth: HealthCheckResult;
+  processFailure?: string;
+}
 
 function projectRoot(): string {
   return app.isPackaged ? app.getAppPath() : resolve(DESKTOP_DIRECTORY, "../..");
@@ -420,10 +435,10 @@ async function clearLogs(): Promise<DesktopLogCleanup> {
   };
 }
 
-function requestHealth(port: number): Promise<boolean> {
+function requestHealthDetail(port: number): Promise<HealthCheckResult> {
   return new Promise((resolveHealth) => {
     let settled = false;
-    const finish = (result: boolean) => {
+    const finish = (result: HealthCheckResult) => {
       if (settled) return;
       settled = true;
       resolveHealth(result);
@@ -442,15 +457,31 @@ function requestHealth(port: number): Promise<boolean> {
         response.on("data", (chunk: Buffer) => chunks.push(chunk));
         response.on("end", () => {
           if (response.statusCode !== 200) {
-            finish(false);
+            finish({
+              ok: false,
+              status: "http_error",
+              detail: `HTTP ${response.statusCode ?? "未知"}`,
+            });
             return;
           }
 
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { ok?: unknown; name?: unknown };
-            finish(body.ok === true && body.name === "devspace");
-          } catch {
-            finish(false);
+            if (body.ok === true && body.name === "devspace") {
+              finish({ ok: true, status: "healthy" });
+              return;
+            }
+            finish({
+              ok: false,
+              status: "invalid_response",
+              detail: "返回内容不是 DevSpace 健康检查响应",
+            });
+          } catch (error) {
+            finish({
+              ok: false,
+              status: "invalid_response",
+              detail: `无法解析健康检查响应：${errorMessage(error)}`,
+            });
           }
         });
       },
@@ -458,11 +489,76 @@ function requestHealth(port: number): Promise<boolean> {
 
     client.on("timeout", () => {
       client.destroy();
-      finish(false);
+      finish({
+        ok: false,
+        status: "timeout",
+        detail: `${HEALTH_CHECK_TIMEOUT_MS} ms 内未收到响应`,
+      });
     });
-    client.on("error", () => finish(false));
+    client.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ECONNREFUSED") {
+        finish({
+          ok: false,
+          status: "connection_refused",
+          detail: "端口当前没有服务监听",
+        });
+        return;
+      }
+      finish({
+        ok: false,
+        status: "network_error",
+        detail: error.code ? `${error.code}: ${error.message}` : error.message,
+      });
+    });
     client.end();
   });
+}
+
+async function requestHealth(port: number): Promise<boolean> {
+  return (await requestHealthDetail(port)).ok;
+}
+
+function healthCheckDescription(result: HealthCheckResult): string {
+  if (result.ok) return "健康检查已通过";
+  switch (result.status) {
+    case "connection_refused":
+      return "端口未监听";
+    case "timeout":
+      return `健康检查超时（${result.detail}）`;
+    case "http_error":
+      return `健康检查返回异常状态（${result.detail}）`;
+    case "invalid_response":
+      return `健康检查响应无效（${result.detail}）`;
+    case "network_error":
+      return `健康检查网络异常（${result.detail}）`;
+  }
+}
+
+async function stabilizeExistingServiceHealth(port: number): Promise<HealthCheckResult> {
+  let health = await requestHealthDetail(port);
+  if (health.ok || health.status === "connection_refused") return health;
+
+  // 端口已有监听但 DevSpace 暂时没有及时响应时，给旧实例一个短暂恢复窗口，避免直接再启动第二个服务争抢端口。
+  const deadline = Date.now() + EXISTING_SERVICE_GRACE_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+    health = await requestHealthDetail(port);
+    if (health.ok || health.status === "connection_refused") return health;
+  }
+  return health;
+}
+
+function summarizeStartupStderr(stderr: string): string | null {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  // 优先展示最可能直接指向根因的错误行，避免把完整 Node 堆栈塞进状态提示。
+  const preferred = lines.find((line) => /EADDRINUSE|better-sqlite3|Unable to read|owner token|Error:/i.test(line))
+    ?? lines[0];
+  return preferred.length > 500 ? `${preferred.slice(0, 497)}...` : preferred;
 }
 
 async function getSnapshot(): Promise<DesktopSnapshot> {
@@ -606,13 +702,26 @@ function broadcastStatus(): void {
   });
 }
 
-async function waitForHealth(port: number, timeoutMs: number): Promise<boolean> {
+async function waitForStartupHealth(
+  port: number,
+  timeoutMs: number,
+  processFailure: () => string | null,
+): Promise<StartupHealthResult> {
   const deadline = Date.now() + timeoutMs;
+  let lastHealth = await requestHealthDetail(port);
   while (Date.now() < deadline) {
-    if (await requestHealth(port)) return true;
+    if (lastHealth.ok) return { healthy: true, lastHealth };
+    const failure = processFailure();
+    if (failure) return { healthy: false, lastHealth, processFailure: failure };
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+    lastHealth = await requestHealthDetail(port);
   }
-  return false;
+  const failure = processFailure();
+  return {
+    healthy: false,
+    lastHealth,
+    ...(failure ? { processFailure: failure } : {}),
+  };
 }
 
 async function assertServerBuild(): Promise<void> {
@@ -634,7 +743,8 @@ async function startService(): Promise<DesktopSnapshot> {
   if (!config.authConfigured || config.allowedRoots.length === 0) {
     throw new Error("请先保存至少一个允许访问的项目目录，以生成完整的 DevSpace 配置。");
   }
-  if (await requestHealth(config.port)) {
+  const existingHealth = await stabilizeExistingServiceHealth(config.port);
+  if (existingHealth.ok) {
     serviceState = "running";
     lastMessage = serverProcess
       ? "DevSpace 已由桌面端启动并正在运行。"
@@ -645,6 +755,12 @@ async function startService(): Promise<DesktopSnapshot> {
   if (serverProcess) {
     lastMessage = "DevSpace 正在启动，请稍后重试。";
     return getSnapshot();
+  }
+  if (existingHealth.status !== "connection_refused") {
+    serviceState = "error";
+    lastMessage = `端口 ${config.port} 已有进程监听，但没有得到有效的 DevSpace 响应：${healthCheckDescription(existingHealth)}。请退出旧版 DevSpace Desktop、停止占用该端口的进程，或更换端口后重试。`;
+    broadcastStatus();
+    throw new Error(lastMessage);
   }
 
   await assertServerBuild();
@@ -662,18 +778,22 @@ async function startService(): Promise<DesktopSnapshot> {
     detached: process.platform !== "win32",
   });
   serverProcess = child;
+  let startupFailure: string | null = null;
+  let startupStderr = "";
 
   child.stdout?.on("data", (chunk: Buffer) => {
     appendOutput("stdout", chunk);
     broadcastOutput();
   });
   child.stderr?.on("data", (chunk: Buffer) => {
+    startupStderr = `${startupStderr}${String(chunk)}`.slice(-8_000);
     appendOutput("stderr", chunk);
     broadcastOutput();
   });
   child.on("error", (error) => {
     appendOutput("stderr", error.message);
-    lastMessage = `无法启动 DevSpace：${error.message}`;
+    startupFailure = `无法启动 DevSpace：${error.message}`;
+    lastMessage = startupFailure;
     serviceState = "error";
     serverProcess = undefined;
     broadcastStatus();
@@ -688,15 +808,24 @@ async function startService(): Promise<DesktopSnapshot> {
     } else if (code === 0) {
       serviceState = "stopped";
       lastMessage = "DevSpace 已退出。";
+      startupFailure ??= "DevSpace 在完成启动前已退出。";
     } else {
       serviceState = "error";
-      lastMessage = `DevSpace 已退出（代码 ${code ?? "未知"}${signal ? `，信号 ${signal}` : ""}）。`;
+      const detail = summarizeStartupStderr(startupStderr);
+      startupFailure ??= `DevSpace 启动进程已退出（代码 ${code ?? "未知"}${signal ? `，信号 ${signal}` : ""}）${detail ? `：${detail}` : "。"}`;
+      lastMessage = startupFailure;
     }
     broadcastStatus();
   });
 
-  const started = await waitForHealth(config.port, START_TIMEOUT_MS);
-  if (!started) {
+  const started = await waitForStartupHealth(config.port, START_TIMEOUT_MS, () => startupFailure);
+  if (!started.healthy) {
+    if (started.processFailure) {
+      serviceState = "error";
+      lastMessage = started.processFailure;
+      broadcastStatus();
+      throw new Error(lastMessage);
+    }
     if (serverProcess === child) {
       stopRequested = true;
       terminateProcessTree(child, "SIGTERM", process.platform !== "win32");
@@ -705,7 +834,7 @@ async function startService(): Promise<DesktopSnapshot> {
       stopRequested = false;
     }
     serviceState = "error";
-    lastMessage = "DevSpace 未能在限定时间内通过健康检查。请查看服务输出和运行环境诊断。";
+    lastMessage = `DevSpace 未能在 ${Math.round(START_TIMEOUT_MS / 1_000)} 秒内通过健康检查。最后状态：${healthCheckDescription(started.lastHealth)}。启动进程已停止，请查看服务输出和运行环境诊断。`;
     broadcastStatus();
     throw new Error(lastMessage);
   }
@@ -964,22 +1093,38 @@ function registerIpcHandlers(): void {
   });
 }
 
-app.whenReady().then(() => {
-  // Windows 默认菜单栏对桌面控制台没有可用操作，统一移除以避免占用界面空间。
-  Menu.setApplicationMenu(null);
-  registerIpcHandlers();
-  createTray();
-  createWindow();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-  app.on("activate", showMainWindow);
-});
-
-app.on("before-quit", () => {
+if (!hasSingleInstanceLock) {
+  // 同一用户下已有 DevSpace Desktop 时直接退出新实例，避免多个桌面进程争抢同一个 MCP 端口。
   isQuitting = true;
-  tray?.destroy();
-  tray = undefined;
-  if (serverProcess) {
-    stopRequested = true;
-    terminateProcessTree(serverProcess, "SIGTERM", process.platform !== "win32");
-  }
-});
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (app.isReady()) {
+      showMainWindow();
+      return;
+    }
+    app.once("ready", showMainWindow);
+  });
+
+  app.whenReady().then(() => {
+    // Windows 默认菜单栏对桌面控制台没有可用操作，统一移除以避免占用界面空间。
+    Menu.setApplicationMenu(null);
+    registerIpcHandlers();
+    createTray();
+    createWindow();
+
+    app.on("activate", showMainWindow);
+  });
+
+  app.on("before-quit", () => {
+    isQuitting = true;
+    tray?.destroy();
+    tray = undefined;
+    if (serverProcess) {
+      stopRequested = true;
+      terminateProcessTree(serverProcess, "SIGTERM", process.platform !== "win32");
+    }
+  });
+}
