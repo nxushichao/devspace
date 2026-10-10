@@ -1,4 +1,6 @@
 import type { Request } from "express";
+import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug";
 export type LogFormat = "json" | "pretty";
@@ -14,6 +16,18 @@ export interface LoggingConfig {
 }
 
 type LogFields = Record<string, unknown>;
+
+export interface DiagnosticLogger {
+  filePath: string;
+  log(
+    level: Exclude<LogLevel, "silent">,
+    event: string,
+    fields?: LogFields,
+  ): void;
+  flush(): Promise<void>;
+}
+
+const MAX_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024;
 
 const LEVEL_WEIGHT: Record<LogLevel, number> = {
   silent: 0,
@@ -35,13 +49,63 @@ export function logEvent(
 ): void {
   if (!shouldLog(config, level)) return;
 
-  const entry = {
+  const entry = buildLogEntry(level, event, fields);
+  writeConsoleEntry(config, level, entry);
+}
+
+export function createDiagnosticLogger(
+  config: LoggingConfig,
+  stateDir: string,
+): DiagnosticLogger {
+  const filePath = join(stateDir, "logs", "devspace-diagnostics.log");
+  let writeQueue = Promise.resolve();
+
+  return {
+    filePath,
+    log(level, event, fields = {}) {
+      if (!shouldLog(config, level)) return;
+
+      const entry = buildLogEntry(level, event, fields);
+      writeConsoleEntry(config, level, entry);
+      const line = `${JSON.stringify(entry)}\n`;
+
+      // 文件写入串行化，避免并发 rotate/append 导致 Windows 下文件竞争或日志乱序。
+      writeQueue = writeQueue
+        .then(() => appendDiagnosticLine(filePath, line))
+        .catch((error) => {
+          console.error(JSON.stringify({
+            ts: new Date().toISOString(),
+            level: "error",
+            event: "diagnostic_log_write_failed",
+            filePath,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        });
+    },
+    async flush() {
+      await writeQueue;
+    },
+  };
+}
+
+function buildLogEntry(
+  level: Exclude<LogLevel, "silent">,
+  event: string,
+  fields: LogFields,
+): LogFields {
+  return {
     ts: new Date().toISOString(),
     level,
     event,
     ...fields,
   };
+}
 
+function writeConsoleEntry(
+  config: LoggingConfig,
+  level: Exclude<LogLevel, "silent">,
+  entry: LogFields,
+): void {
   const line = config.format === "pretty" ? formatPretty(entry) : JSON.stringify(entry);
   if (level === "error") {
     console.error(line);
@@ -50,6 +114,23 @@ export function logEvent(
   } else {
     console.log(line);
   }
+}
+
+async function appendDiagnosticLine(filePath: string, line: string): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true });
+
+  try {
+    const metadata = await stat(filePath);
+    if (metadata.size + Buffer.byteLength(line) > MAX_DIAGNOSTIC_LOG_BYTES) {
+      const backupPath = `${filePath}.1`;
+      await rm(backupPath, { force: true });
+      await rename(filePath, backupPath);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  await appendFile(filePath, line, { encoding: "utf8", mode: 0o600 });
 }
 
 export function requestIp(req: Request): string | undefined {

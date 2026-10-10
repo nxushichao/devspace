@@ -27,11 +27,13 @@ import {
   type IncomingArtifactAdapter,
 } from "./incoming-artifacts.js";
 import {
+  createDiagnosticLogger,
   logEvent,
   requestIp,
   requestPath,
   sessionIdPrefix,
 } from "./logger.js";
+import { BoundedMcpEventStore } from "./mcp-event-store.js";
 import { readFileTool } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import {
@@ -81,6 +83,7 @@ const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 interface RunningServer {
   app: ReturnType<typeof createMcpExpressApp>;
   config: ServerConfig;
+  diagnosticLogPath: string;
   localAgentProviders: LocalAgentProviderStatus[];
   close(): Promise<void>;
 }
@@ -732,6 +735,7 @@ export function createServer(
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
+  const diagnosticLogger = createDiagnosticLogger(config.logging, config.stateDir);
   const localAgentProviders = buildLocalAgentProviderStatuses(
     config.subagents,
     getLocalAgentProviderAvailabilitySnapshot(),
@@ -747,7 +751,7 @@ export function createServer(
   ) => {
     for (const result of results) {
       if (result.error) {
-        logEvent(config.logging, "warn", "mcp_session_close_failed", {
+        diagnosticLogger.log("warn", "mcp_session_close_failed", {
           reason,
           sessionIdPrefix: sessionIdPrefix(result.sessionId),
           error:
@@ -779,9 +783,12 @@ export function createServer(
   app.use((req, res, next) => {
     const requestId = randomUUID();
     const startedAt = performance.now();
+    let completed = false;
+    let disconnectLogged = false;
     res.locals.requestId = requestId;
 
     res.on("finish", () => {
+      completed = true;
       const path = requestPath(req);
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
@@ -795,6 +802,24 @@ export function createServer(
         ...requestLogFields(req),
       });
     });
+
+    const logUnexpectedDisconnect = (reason: "request_aborted" | "response_closed") => {
+      if (completed || disconnectLogged || requestPath(req) !== "/mcp") return;
+      disconnectLogged = true;
+      diagnosticLogger.log("warn", "mcp_http_stream_disconnected", {
+        requestId,
+        reason,
+        method: req.method,
+        path: requestPath(req),
+        durationMs: Math.round(performance.now() - startedAt),
+        sessionIdPrefix: sessionIdPrefix(req.header("mcp-session-id")),
+        lastEventIdPresent: Boolean(req.header("last-event-id")),
+        ...requestLogFields(req),
+      });
+    };
+
+    req.on("aborted", () => logUnexpectedDisconnect("request_aborted"));
+    res.on("close", () => logUnexpectedDisconnect("response_closed"));
 
     next();
   });
@@ -832,6 +857,7 @@ export function createServer(
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
     const sessionId = req.header("mcp-session-id");
+    const lastEventId = req.header("last-event-id");
     const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
 
     await new Promise<void>((resolve, reject) => {
@@ -862,18 +888,37 @@ export function createServer(
       isInitialize: initializeRequest,
     });
 
+    if (lastEventId) {
+      logEvent(config.logging, "info", "mcp_stream_resume_requested", {
+        requestId,
+        method: req.method,
+        sessionIdPrefix: sessionIdPrefix(sessionId),
+        lastEventIdPrefix: lastEventId.slice(0, 8),
+      });
+    }
+
     try {
       let transport: Transport | undefined;
 
       if (sessionId) {
         transport = transports.get(sessionId);
         if (!transport) {
+          diagnosticLogger.log("warn", "mcp_unknown_session", {
+            requestId,
+            method: req.method,
+            sessionIdPrefix: sessionIdPrefix(sessionId),
+            lastEventIdPresent: Boolean(lastEventId),
+            ...requestLogFields(req),
+          });
           sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
           return;
         }
       } else if (initializeRequest) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
+          // 启用 SDK 原生 Last-Event-ID 重放；事件只在当前会话内短时保留并有数量上限。
+          eventStore: new BoundedMcpEventStore(),
+          retryInterval: 1_000,
           onsessioninitialized: (newSessionId) => {
             if (transport) transports.register(newSessionId, transport);
             logEvent(config.logging, "info", "mcp_session_created", {
@@ -882,7 +927,23 @@ export function createServer(
               ...requestLogFields(req),
             });
           },
+          onsessionclosed: (closedSessionId) => {
+            if (transports.remove(closedSessionId)) {
+              logEvent(config.logging, "info", "mcp_session_closed", {
+                reason: "client_delete",
+                sessionIdPrefix: sessionIdPrefix(closedSessionId),
+              });
+            }
+          },
         });
+
+        transport.onerror = (error) => {
+          diagnosticLogger.log("error", "mcp_transport_error", {
+            requestId,
+            sessionIdPrefix: sessionIdPrefix(transport?.sessionId),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        };
 
         transport.onclose = () => {
           const closedSessionId = transport?.sessionId;
@@ -910,8 +971,10 @@ export function createServer(
 
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      logEvent(config.logging, "error", "mcp_request_error", {
+      diagnosticLogger.log("error", "mcp_request_error", {
         requestId,
+        method: req.method,
+        sessionIdPrefix: sessionIdPrefix(sessionId),
         error: error instanceof Error ? error.message : String(error),
       });
       if (!res.headersSent) {
@@ -924,6 +987,7 @@ export function createServer(
   return {
     app,
     config,
+    diagnosticLogPath: diagnosticLogger.filePath,
     localAgentProviders,
     close: () => {
       closePromise ??= (async () => {
@@ -933,6 +997,7 @@ export function createServer(
         processSessions.shutdown();
         oauthProvider.close();
         workspaceStore.close?.();
+        await diagnosticLogger.flush();
       })();
       return closePromise;
     },
@@ -948,7 +1013,7 @@ async function isMainModule(): Promise<boolean> {
 }
 
 if (await isMainModule()) {
-  const { app, config, close, localAgentProviders } = createServer();
+  const { app, config, close, diagnosticLogPath, localAgentProviders } = createServer();
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(
       `devspace listening on http://${config.host}:${config.port}/mcp`,
@@ -959,6 +1024,7 @@ if (await isMainModule()) {
     console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
     console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
     console.log(`trust proxy: ${config.logging.trustProxy ? "1 hop" : "loopback only"}`);
+    console.log(`diagnostic log: ${diagnosticLogPath}`);
     const artifactDownloadStatus = !config.artifactsEnabled
       ? "disabled"
       : isArtifactDownloadSupportedPlatform()

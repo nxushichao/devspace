@@ -1,7 +1,7 @@
 node_modules/
 dist/
-releases/
 release/
+releases/
+build/icon.ico
 .env
 *.log
-.idea

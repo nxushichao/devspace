@@ -397,6 +397,8 @@ async function clearProjectLogFiles(): Promise<{ files: number; bytes: number }>
   const logFiles = [
     join(projectRoot(), "logs", "devspace.out.log"),
     join(projectRoot(), "logs", "devspace.err.log"),
+    join(loadConfig().stateDir, "logs", "devspace-diagnostics.log"),
+    join(loadConfig().stateDir, "logs", "devspace-diagnostics.log.1"),
   ];
   let files = 0;
   let bytes = 0;
@@ -424,7 +426,7 @@ async function clearLogs(): Promise<DesktopLogCleanup> {
   const memoryEntries = outputLines.length;
   outputLines.length = 0;
   const disk = await clearProjectLogFiles();
-  lastMessage = "GPT 调用日志已清空。";
+  lastMessage = "DevSpace 日志已清空。";
   broadcastOutput();
 
   return {
